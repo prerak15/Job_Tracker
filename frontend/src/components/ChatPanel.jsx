@@ -9,13 +9,15 @@ const EXAMPLES = [
   '“Tailor my master resume for the Acme role”',
 ]
 
-export default function ChatPanel({ onClose, onDataChanged }) {
+export default function ChatPanel({ onClose, onDataChanged, prompt }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [sessionId, setSessionId] = useState(null)
   const [health, setHealth] = useState(null)
   const bodyRef = useRef(null)
+  const busyRef = useRef(false)
+  const lastPrompt = useRef(null)
 
   useEffect(() => {
     api.chat.health().then(setHealth).catch(() => setHealth({ ok: false }))
@@ -25,11 +27,20 @@ export default function ChatPanel({ onClose, onDataChanged }) {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
 
-  async function send() {
-    const text = input.trim()
-    if (!text || busy) return
+  // A dashboard button (e.g. "Generate resume") hands us a ready-made prompt.
+  // Each click carries a new token so the same text can be sent twice.
+  useEffect(() => {
+    if (!prompt || prompt.token === lastPrompt.current || busyRef.current) return
+    lastPrompt.current = prompt.token
+    send(prompt.text)
+  })
 
-    setInput('')
+  async function send(override) {
+    const text = (override ?? input).trim()
+    if (!text || busyRef.current) return
+
+    if (override === undefined) setInput('')
+    busyRef.current = true
     setBusy(true)
     setMessages((m) => [...m, { role: 'user', text }, { role: 'assistant', text: '', tools: [] }])
 
@@ -61,6 +72,7 @@ export default function ChatPanel({ onClose, onDataChanged }) {
         return next
       })
     } finally {
+      busyRef.current = false
       setBusy(false)
       // Any write tool means the dashboard is now stale.
       if (touchedData) onDataChanged()
@@ -132,9 +144,10 @@ export default function ChatPanel({ onClose, onDataChanged }) {
           onKeyDown={(e) => {
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send()
           }}
+          disabled={busy}
         />
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button className="btn primary" onClick={send} disabled={busy || !input.trim()}>
+          <button className="btn primary" onClick={() => send()} disabled={busy || !input.trim()}>
             {busy ? 'Working…' : 'Send'}
           </button>
           <span className="small muted">Ctrl+Enter</span>

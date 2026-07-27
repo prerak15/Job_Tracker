@@ -34,6 +34,14 @@ export default function App() {
   const [data, setData] = useState(EMPTY)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [chatPrompt, setChatPrompt] = useState(null)
+
+  // Dashboard buttons hand a ready-made question to the assistant. The token
+  // makes repeat clicks distinct so the same prompt can be sent twice.
+  const askAssistant = useCallback((text) => {
+    setChatOpen(true)
+    setChatPrompt({ text, token: Date.now() })
+  }, [])
 
   const reload = useCallback(async () => {
     try {
@@ -149,6 +157,7 @@ export default function App() {
                   meta={data.meta}
                   resumes={data.resumes}
                   reload={reload}
+                  askAssistant={askAssistant}
                 />
               )}
               {tab === 'dsa' && (
@@ -181,7 +190,13 @@ export default function App() {
           )}
         </main>
 
-        {chatOpen && <ChatPanel onClose={() => setChatOpen(false)} onDataChanged={reload} />}
+        {chatOpen && (
+          <ChatPanel
+            onClose={() => setChatOpen(false)}
+            onDataChanged={reload}
+            prompt={chatPrompt}
+          />
+        )}
       </div>
     </div>
   )

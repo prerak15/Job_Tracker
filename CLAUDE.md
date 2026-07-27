@@ -18,8 +18,12 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   ai.py          chat agent, ~29 in-process tools
   main.py        REST routes
 frontend/    Vite + React dashboard (4 tabs + chat drawer)
-data/        the database — four JSON files, committed to git
+data/        the database — four JSON files, GITIGNORED
 ```
+
+**Never commit anything under `data/`.** The repo is meant to be shareable; the
+tracker's contents are private. The files are created on first run, so a fresh
+clone works with an empty `data/`.
 
 ## Running it
 

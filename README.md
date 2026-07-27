@@ -66,23 +66,26 @@ The assistant only has the ~29 tools that read and write this tracker, plus web
 search for looking up an unfamiliar company. It has no shell or filesystem
 access.
 
-## Your data
+## Your data stays on your machine
 
-Everything lives in `data/`, as readable JSON committed alongside the code:
+Everything lives in `data/`, as readable JSON:
 
 | File | Holds |
 |---|---|
-| `jobs.json` | applications, rounds, contacts, follow-ups |
+| `jobs.json` | applications and leads, rounds, contacts, follow-ups |
 | `resumes.json` | resume versions and tailoring suggestions |
 | `dsa.json` | DSA problems, timings, issue log |
 | `design.json` | LLD/HLD topics, tradeoffs, artifacts |
 
-Because it's plain JSON in a git repo, every change is diffable and you have
-full history. You can also edit it from a Claude Code session in this folder —
-see [CLAUDE.md](CLAUDE.md) for the schema.
+**`data/` is gitignored.** The repository is safe to share or make public — your
+application history, recruiter names, and contact details are never committed.
+The app creates the files on first run, so a fresh clone starts empty.
 
-Keep the repository **private**; it contains your application history and
-contact details.
+If you want your own history version-controlled, keep a separate private repo
+inside `data/`, or back the folder up somewhere off-git.
+
+You can also edit the files from a Claude Code session in this folder — see
+[CLAUDE.md](CLAUDE.md) for the schema.
 
 ## Ideas for later
 

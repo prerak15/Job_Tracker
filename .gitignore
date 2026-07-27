@@ -15,8 +15,11 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Scratch data written by the atomic-write path if a run is interrupted
+# Your tracker data is PRIVATE and never committed — this repo is shareable,
+# your application history is not. The app recreates these files on first run.
+data/*.json
 data/*.tmp
+!data/.gitkeep
 
 # Local Claude Code state (launch.json is intentionally committed)
 .claude/settings.local.json

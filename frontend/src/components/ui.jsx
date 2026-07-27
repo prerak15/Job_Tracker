@@ -83,9 +83,16 @@ export function Pill({ children, tone }) {
   return <span className={`pill ${cls}`}>{label(children)}</span>
 }
 
+// A few stored values read better with a different word in the UI. The stored
+// value never changes — only what the reader sees.
+const DISPLAY_OVERRIDES = {
+  saved: 'yet to apply',
+}
+
 export function label(value) {
   if (value === null || value === undefined || value === '') return '—'
-  return String(value).replace(/_/g, ' ')
+  const key = String(value)
+  return DISPLAY_OVERRIDES[key] ?? key.replace(/_/g, ' ')
 }
 
 export function Tags({ items }) {

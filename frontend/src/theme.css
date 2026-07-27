@@ -359,6 +359,15 @@ textarea {
   text-align: right;
 }
 
+.lead-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--grid);
+  flex-wrap: wrap;
+}
+
 .meter {
   height: 8px;
   background: var(--seq-track);

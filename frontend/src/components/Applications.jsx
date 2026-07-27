@@ -19,11 +19,18 @@ const BLANK = {
   notes: '',
 }
 
-export default function Applications({ jobs, stats, followups, meta, resumes, reload }) {
+/** Prompt sent to the assistant when generating a resume for one job. */
+export function resumePrompt(job) {
+  return `Generate a tailored resume for the ${job.job_title} role at ${job.organisation}. Start from my best matching existing version, rewrite it against that job description, save it as a new version, and link it to this application. Only reframe experience I already have — tell me if the job wants something I'm missing.`
+}
+
+export default function Applications({ jobs, stats, followups, meta, resumes, reload, askAssistant }) {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [expanded, setExpanded] = useState(null)
   const [adding, setAdding] = useState(false)
+
+  const leads = useMemo(() => jobs.filter((j) => j.status === 'saved'), [jobs])
 
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase()
@@ -61,13 +68,79 @@ export default function Applications({ jobs, stats, followups, meta, resumes, re
   return (
     <>
       <div className="tiles">
-        <Tile label="Applications" value={stats.applied_total ?? 0} note={`${stats.total ?? 0} tracked incl. saved`} />
+        <Tile label="Applications" value={stats.applied_total ?? 0} note={`${stats.total ?? 0} tracked incl. leads`} />
+        <Tile label="Leads" value={leads.length} note="found, yet to apply" />
         <Tile label="Active pipeline" value={stats.active ?? 0} note="applied or interviewing" />
         <Tile label="Response rate" value={pct(stats.response_rate)} note="heard back at all" />
         <Tile label="Interview rate" value={pct(stats.interview_rate)} note="reached a round" />
         <Tile label="Offer rate" value={pct(stats.offer_rate)} note={plural(stats.by_status?.offer ?? 0, 'offer')} />
         <Tile label="Per week" value={stats.applications_per_week ?? 0} note="last 4 weeks" />
       </div>
+
+      {leads.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <Card
+            title="Leads — yet to apply"
+            sub="Roles you've saved but not applied to. Generate a tailored resume, then mark them applied."
+          >
+            <div className="rows">
+              {leads.map((lead) => (
+                <div key={lead.id} className="lead-row">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="row-main" style={{ fontSize: 13 }}>
+                      {lead.job_title || 'Untitled role'}
+                      {lead.url && (
+                        <a
+                          href={lead.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="small"
+                          style={{ marginLeft: 8 }}
+                        >
+                          posting ↗
+                        </a>
+                      )}
+                    </div>
+                    <div className="row-sub">
+                      {lead.organisation}
+                      {lead.company_type && ` · ${label(lead.company_type)}`}
+                      {lead.location && ` · ${lead.location}`}
+                      {lead.resume_id
+                        ? ` · resume ready`
+                        : lead.job_description
+                          ? ' · JD stored'
+                          : ' · no JD yet'}
+                    </div>
+                  </div>
+                  <button
+                    className="btn small"
+                    title={
+                      lead.job_description
+                        ? 'Ask the assistant to write a version for this posting'
+                        : 'No job description stored — the assistant will have little to work from'
+                    }
+                    onClick={() => askAssistant(resumePrompt(lead))}
+                  >
+                    Generate resume
+                  </button>
+                  <button
+                    className="btn small primary"
+                    onClick={async () => {
+                      await api.jobs.update(lead.id, {
+                        status: 'applied',
+                        latest_update: 'Applied',
+                      })
+                      reload()
+                    }}
+                  >
+                    Mark applied
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' }}>
         <Card title="Pipeline" sub="Where every application currently sits">
@@ -183,6 +256,7 @@ export default function Applications({ jobs, stats, followups, meta, resumes, re
                 <tr>
                   <th>Role</th>
                   <th>Status</th>
+                  <th>Resume sent</th>
                   <th>Latest update</th>
                   <th className="num">Rounds</th>
                   <th className="num">Follow-ups</th>
@@ -198,6 +272,7 @@ export default function Applications({ jobs, stats, followups, meta, resumes, re
                     open={expanded === job.id}
                     onToggle={() => setExpanded(expanded === job.id ? null : job.id)}
                     reload={reload}
+                    askAssistant={askAssistant}
                   />
                 ))}
               </tbody>
@@ -209,7 +284,8 @@ export default function Applications({ jobs, stats, followups, meta, resumes, re
   )
 }
 
-function JobRow({ job, meta, resumes, open, onToggle, reload }) {
+function JobRow({ job, meta, resumes, open, onToggle, reload, askAssistant }) {
+  const resume = resumes.find((r) => r.id === job.resume_id)
   return (
     <>
       <tr className="clickable" onClick={onToggle}>
@@ -241,7 +317,16 @@ function JobRow({ job, meta, resumes, open, onToggle, reload }) {
             ))}
           </select>
         </td>
-        <td style={{ maxWidth: 320 }}>
+        <td className="small" style={{ maxWidth: 150 }}>
+          {resume ? (
+            <span title={resume.name}>
+              {resume.version_label || resume.name}
+            </span>
+          ) : (
+            <span className="muted">not recorded</span>
+          )}
+        </td>
+        <td style={{ maxWidth: 300 }}>
           <div className="small">{job.latest_update || '—'}</div>
           <div className="row-sub">{job.latest_update_date}</div>
         </td>
@@ -250,8 +335,14 @@ function JobRow({ job, meta, resumes, open, onToggle, reload }) {
       </tr>
       {open && (
         <tr className="detail">
-          <td colSpan={5}>
-            <JobDetail job={job} meta={meta} resumes={resumes} reload={reload} />
+          <td colSpan={6}>
+            <JobDetail
+              job={job}
+              meta={meta}
+              resumes={resumes}
+              reload={reload}
+              askAssistant={askAssistant}
+            />
           </td>
         </tr>
       )}
@@ -259,7 +350,7 @@ function JobRow({ job, meta, resumes, open, onToggle, reload }) {
   )
 }
 
-function JobDetail({ job, meta, resumes, reload }) {
+function JobDetail({ job, meta, resumes, reload, askAssistant }) {
   const [round, setRound] = useState({ name: '', result: 'pending', feedback: '' })
   const [contact, setContact] = useState({ name: '', role: 'recruiter', email: '', is_referral: false })
   const [note, setNote] = useState('')
@@ -307,6 +398,30 @@ function JobDetail({ job, meta, resumes, reload }) {
             </option>
           ))}
         </select>
+        <button
+          className="btn small"
+          style={{ marginTop: 8 }}
+          onClick={() => askAssistant(resumePrompt(job))}
+        >
+          Generate tailored resume
+        </button>
+        {!job.job_description && (
+          <p className="small muted" style={{ marginTop: 6, marginBottom: 0 }}>
+            No job description stored — paste the posting below first for a better result.
+          </p>
+        )}
+
+        <h4 style={{ marginTop: 16 }}>Job description</h4>
+        <textarea
+          defaultValue={job.job_description}
+          placeholder="Paste the posting text — this is what the resume is tailored against"
+          onBlur={async (e) => {
+            if (e.target.value !== job.job_description) {
+              await api.jobs.update(job.id, { job_description: e.target.value })
+              reload()
+            }
+          }}
+        />
       </div>
 
       <div>
