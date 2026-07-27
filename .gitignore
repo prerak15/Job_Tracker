@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+*.log
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Scratch data written by the atomic-write path if a run is interrupted
+data/*.tmp
+
+# Local Claude Code state (launch.json is intentionally committed)
+.claude/settings.local.json
