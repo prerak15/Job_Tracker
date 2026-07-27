@@ -47,6 +47,30 @@ export const api = {
     stats: () => get('/resumes/stats'),
     setApplied: (id, index, applied) => patch(`/resumes/${id}/tailor/${index}`, { applied }),
     link: (id, jobId) => post(`/resumes/${id}/link/${jobId}`),
+    // Streams the file through a blob so the browser keeps the server's
+    // filename and a failure surfaces as a message rather than a broken tab.
+    async download(id, format) {
+      const res = await fetch(`/api/resumes/${id}/download?format=${format}`)
+      if (!res.ok) {
+        let detail = res.statusText
+        try {
+          detail = (await res.json()).detail ?? detail
+        } catch {
+          /* non-JSON error body */
+        }
+        throw new Error(detail)
+      }
+      const disposition = res.headers.get('Content-Disposition') ?? ''
+      const match = disposition.match(/filename="([^"]+)"/)
+      const url = URL.createObjectURL(await res.blob())
+      const link = document.createElement('a')
+      link.href = url
+      link.download = match?.[1] ?? `resume.${format}`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    },
   },
 
   dsa: {

@@ -119,6 +119,12 @@ async def get_job_tool(args: dict[str, Any]) -> dict[str, Any]:
             "industry": {**STR, "description": "e.g. fintech, healthtech, devtools"},
             "org_summary": {**STR, "description": "1-2 sentences on what the org does"},
             "source": {"type": "string", "enum": storage.SOURCES},
+            "found_via": {
+                **STR,
+                "description": "Where exactly it was found — the specific board, "
+                "person, newsletter, group or post, e.g. 'LinkedIn post by their "
+                "VP Eng' or 'forwarded by Anita'",
+            },
             "location": STR,
             "salary_range": STR,
             "url": STR,
@@ -150,6 +156,12 @@ async def add_job_tool(args: dict[str, Any]) -> dict[str, Any]:
             "industry": STR,
             "org_summary": STR,
             "source": {"type": "string", "enum": storage.SOURCES},
+            "found_via": {
+                **STR,
+                "description": "Where exactly it was found — the specific board, "
+                "person, newsletter, group or post, e.g. 'LinkedIn post by their "
+                "VP Eng' or 'forwarded by Anita'",
+            },
             "location": STR,
             "salary_range": STR,
             "url": STR,
@@ -282,8 +294,10 @@ async def list_resumes_tool(_: dict[str, Any]) -> dict[str, Any]:
                 "name": r["name"],
                 "version_label": r["version_label"],
                 "is_master": r["is_master"],
+                "is_latex_template": r["is_latex_template"],
                 "target_role": r["target_role"],
                 "has_content": bool(r["content"]),
+                "has_latex": bool(r["latex_content"]),
                 "used_for": len(r["used_for"]),
                 "tailoring_entries": len(r["tailoring"]),
             }
@@ -311,6 +325,14 @@ async def get_resume_tool(args: dict[str, Any]) -> dict[str, Any]:
             "name": STR,
             "version_label": {**STR, "description": "e.g. v1, v2-backend"},
             "content": {**STR, "description": "Full resume text"},
+            "latex_content": {
+                **STR,
+                "description": "Full LaTeX source, when the user works in LaTeX",
+            },
+            "is_latex_template": {
+                **BOOL,
+                "description": "True only for the reusable LaTeX template/master",
+            },
             "target_role": STR,
             "is_master": BOOL,
             "based_on": {**STR, "description": "Parent resume id if this is a tailored copy"},
@@ -697,6 +719,9 @@ How to handle common messages:
   Set status to "applied" only if the user says they applied. If they are just
   saving something they found and haven't applied to yet, use "saved" — that is
   the lead state, shown in the app as "yet to apply".
+  If the user says where they came across the role, record both: `source` for
+  the broad channel and `found_via` for the specific detail. Don't guess
+  `found_via` — leave it empty unless they actually said.
 - An update on an application ("rejected from X", "recruiter replied", "OA next
   week") -> list_jobs to find the record, then update_job with a status change
   and a short latest_update. Interview and assessment outcomes go in add_round
@@ -720,6 +745,26 @@ How to handle common messages:
   or year of experience they haven't stated somewhere. If the JD wants
   something they genuinely lack, leave it out and mention the gap in your reply
   rather than papering over it.
+
+  Resume `content` must follow this layout, because it is parsed back out to
+  produce a downloadable Word document:
+    line 1        the person's name, on its own
+    next line(s)  contact details
+    then, repeating: a SECTION HEADING IN ALL CAPS, followed by its content
+  Inside a section, a role or qualification line sits on its own and its
+  detail lines each start with "- ". Use blank lines between blocks. Do not
+  use markdown, asterisks, or "•" characters — plain text only.
+
+  LaTeX: if any stored version has latex_content (check has_latex via
+  list_resumes, and prefer the one with is_latex_template set), the user works
+  in LaTeX. Read that version with get_resume and produce the tailored version
+  as latex_content too, reusing the template's preamble and macros
+  (\\resumeSubheading, \\resumeItem, \\resumeSubHeadingListStart, and so on)
+  exactly as they are defined there — only the content between them changes.
+  Keep \\pdfgentounicode=1 so the compiled PDF stays ATS-parsable, and escape
+  &, %, $, #, and _ as \\&, \\%, \\$, \\#, \\_ inside any text you write.
+  Set both content and latex_content on the new version so the Word and LaTeX
+  downloads agree.
 - DSA or system design activity -> record it with the timings, and always log
   the issue when the user says something was hard or went wrong. The issue log
   is the most valuable part of that data.

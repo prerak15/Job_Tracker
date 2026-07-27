@@ -68,6 +68,7 @@ consistent.
 | `follow_ups_sent[]` | `{date, note}` |
 | `company_type` | `startup` `product` `service` `mnc` `agency` `nonprofit` `other` |
 | `source` | `linkedin` `careers_page` `referral` `naukri` `job_board` `other` |
+| `found_via` | free-text detail behind `source` — the specific post, person, or board |
 | `org_summary` | 1–2 sentences on what the company does; AI-written on intake |
 | `job_description` | raw JD text — the input for resume tailoring |
 | `resume_id` | which resume version was sent (enables per-version response rates) |
@@ -77,10 +78,32 @@ applications yet.
 
 ### `data/resumes.json` — `{"resumes": [...]}`
 
-`content` holds the resume text. `tailoring[]` entries are
+`content` holds the resume text; `latex_content` optionally holds LaTeX source,
+and the version with `is_latex_template` set is the user's canonical template.
+When only LaTeX is present, `resumes._normalize` derives `content` from it via
+`latex_export.to_plain_text`, so the dashboard and the Word export still work.
+
+`tailoring[]` entries are
 `{date, job_id, organisation, missing_keywords[], suggestions[{section, change}], applied}`.
 Tailoring is advisory: never rewrite the resume automatically, and never invent
-experience — suggest reframing what is already there.
+experience — suggest reframing what is already there and state the gaps.
+
+### Resume export
+
+`backend/docx_export.py` parses the plain text back into name / contact /
+sections and renders it with python-docx. It is deliberately ATS-safe — no
+tables, images, text boxes, headers, or columns; bullets come from the real
+`List Bullet` style rather than literal characters. If you change the text
+layout the assistant writes, update `docx_export.parse` and the layout
+description in `ai.py`'s system prompt together, or the Word export degrades
+silently.
+
+`backend/latex_export.py` serves stored LaTeX byte-for-byte and converts the
+Jake Gutierrez / sb2nov macros (`\resumeSubheading`, `\resumeItem`, …) to
+readable text. Use `latex_export.escape` for any plain text written *into*
+LaTeX.
+
+`GET /api/resumes/{id}/download?format=docx|tex`.
 
 ### `data/dsa.json` — `{"problems": [...]}`
 

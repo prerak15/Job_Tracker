@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import design
+import docx_export
 import dsa
+import latex_export
 import resumes
 import storage
 
@@ -82,6 +84,7 @@ class JobIn(BaseModel):
     industry: str | None = None
     org_summary: str | None = None
     source: str | None = None
+    found_via: str | None = None
     location: str | None = None
     salary_range: str | None = None
     job_description: str = ""
@@ -103,6 +106,7 @@ class JobPatch(BaseModel):
     industry: str | None = None
     org_summary: str | None = None
     source: str | None = None
+    found_via: str | None = None
     location: str | None = None
     salary_range: str | None = None
     job_description: str | None = None
@@ -188,6 +192,8 @@ class ResumeIn(BaseModel):
     based_on: str | None = None
     file_path: str | None = None
     content: str = ""
+    latex_content: str = ""
+    is_latex_template: bool = False
     target_role: str | None = None
     is_master: bool = False
     notes: str = ""
@@ -199,6 +205,8 @@ class ResumePatch(BaseModel):
     based_on: str | None = None
     file_path: str | None = None
     content: str | None = None
+    latex_content: str | None = None
+    is_latex_template: bool | None = None
     target_role: str | None = None
     is_master: bool | None = None
     notes: str | None = None
@@ -270,6 +278,52 @@ def patch_tailoring(resume_id: str, index: int, payload: AppliedIn) -> dict[str,
 @app.post("/api/resumes/{resume_id}/link/{job_id}")
 def post_resume_link(resume_id: str, job_id: str) -> dict[str, Any]:
     return _found(resumes.link_to_job(resume_id, job_id), "Resume")
+
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@app.get("/api/resumes/{resume_id}/download")
+def download_resume(resume_id: str, format: str = "docx") -> Response:
+    """Download a resume version as a Word document or LaTeX source."""
+    resume = _found(resumes.get_resume(resume_id), "Resume")
+
+    if format == "tex":
+        latex = resume.get("latex_content") or ""
+        if not latex.strip():
+            raise HTTPException(
+                400,
+                "This version has no LaTeX source. Ask the assistant to generate a "
+                "LaTeX version, or paste one in.",
+            )
+        # Served verbatim — the user's .tex must round-trip byte for byte.
+        person = docx_export.parse(resume.get("content", ""))["name"]
+        return Response(
+            content=latex,
+            media_type="application/x-tex",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{latex_export.filename_for(resume, person)}"'
+                )
+            },
+        )
+
+    if format != "docx":
+        raise HTTPException(400, "format must be 'docx' or 'tex'")
+
+    if not (resume.get("content") or "").strip():
+        raise HTTPException(
+            400, "This version has no resume text yet, so there is nothing to export."
+        )
+    return Response(
+        content=docx_export.build(resume),
+        media_type=DOCX_MIME,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{docx_export.filename_for(resume)}"'
+            )
+        },
+    )
 
 
 # --------------------------------------------------------------------------

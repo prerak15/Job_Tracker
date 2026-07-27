@@ -10,6 +10,7 @@ const BLANK = {
   company_type: '',
   industry: '',
   source: '',
+  found_via: '',
   location: '',
   salary_range: '',
   url: '',
@@ -105,8 +106,10 @@ export default function Applications({ jobs, stats, followups, meta, resumes, re
                       {lead.organisation}
                       {lead.company_type && ` · ${label(lead.company_type)}`}
                       {lead.location && ` · ${lead.location}`}
+                      {(lead.found_via || lead.source) &&
+                        ` · via ${lead.found_via || label(lead.source)}`}
                       {lead.resume_id
-                        ? ` · resume ready`
+                        ? ' · resume ready'
                         : lead.job_description
                           ? ' · JD stored'
                           : ' · no JD yet'}
@@ -370,12 +373,38 @@ function JobDetail({ job, meta, resumes, reload, askAssistant }) {
         )}
         <p className="small muted">
           {job.industry && <>Industry: {job.industry}<br /></>}
-          {job.source && <>Source: {label(job.source)}<br /></>}
           {job.salary_range && <>Salary: {job.salary_range}<br /></>}
           {job.referred_by && <>Referred by: {job.referred_by}<br /></>}
           {job.date_job_posted && <>Posted: {job.date_job_posted}<br /></>}
           Created: {job.date_created}
         </p>
+
+        <h4 style={{ marginTop: 16 }}>Where I found it</h4>
+        <select
+          value={job.source ?? ''}
+          onChange={async (e) => {
+            await api.jobs.update(job.id, { source: e.target.value || null })
+            reload()
+          }}
+        >
+          <option value="">Channel not recorded</option>
+          {meta.sources.map((s) => (
+            <option key={s} value={s}>
+              {label(s)}
+            </option>
+          ))}
+        </select>
+        <input
+          defaultValue={job.found_via ?? ''}
+          placeholder="Exactly where — e.g. post by their VP Eng, forwarded by Anita"
+          style={{ marginTop: 8 }}
+          onBlur={async (e) => {
+            if (e.target.value !== (job.found_via ?? '')) {
+              await api.jobs.update(job.id, { found_via: e.target.value || null })
+              reload()
+            }
+          }}
+        />
         {job.url && (
           <a className="small" href={job.url} target="_blank" rel="noreferrer">
             Open posting ↗
@@ -656,6 +685,13 @@ function JobForm({ meta, onSave }) {
           <input value={form.location} onChange={set('location')} />
         </Field>
       </div>
+      <Field label="Where exactly I found it">
+        <input
+          value={form.found_via}
+          onChange={set('found_via')}
+          placeholder="e.g. LinkedIn post by their VP Eng, forwarded by Anita, HN Who's Hiring"
+        />
+      </Field>
       <div className="field-row">
         <Field label="Date posted">
           <input type="date" value={form.date_job_posted} onChange={set('date_job_posted')} />

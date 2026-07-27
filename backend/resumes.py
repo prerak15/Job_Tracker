@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import latex_export
 import storage
 from jsonstore import apply_defaults, lock_for, new_id, pct, read, today, write
 
@@ -23,6 +24,10 @@ _DEFAULTS: dict[str, Any] = {
     "based_on": None,
     "file_path": None,
     "content": "",
+    # Optional LaTeX source. When present it is the authority for the .tex
+    # download, and plain-text `content` is derived from it if missing.
+    "latex_content": "",
+    "is_latex_template": False,
     "target_role": None,
     "created_date": None,
     "is_master": False,
@@ -36,6 +41,10 @@ def _normalize(resume: dict[str, Any]) -> dict[str, Any]:
     out = apply_defaults(resume, _DEFAULTS)
     if not out["created_date"]:
         out["created_date"] = today()
+    # A LaTeX-only version still needs readable text for the dashboard and
+    # the Word export, so derive it once rather than asking the user twice.
+    if out["latex_content"].strip() and not out["content"].strip():
+        out["content"] = latex_export.to_plain_text(out["latex_content"])
     for entry in out["tailoring"]:
         entry.setdefault("date", out["created_date"])
         entry.setdefault("job_id", None)

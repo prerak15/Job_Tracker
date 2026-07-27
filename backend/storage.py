@@ -63,6 +63,8 @@ _DEFAULTS: dict[str, Any] = {
     "industry": None,
     "org_summary": None,
     "source": None,
+    # Free-text detail behind `source`: the specific place, person, or post.
+    "found_via": None,
     "location": None,
     "salary_range": None,
     "job_description": "",

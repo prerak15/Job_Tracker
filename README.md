@@ -26,7 +26,14 @@ in a revision queue, so weak areas resurface instead of being quietly forgotten.
 application and the Resumes tab gives you a reply rate per version. Ask it to
 tailor a resume against a stored job description and it lists the missing
 keywords and concrete per-section rewrites — advisory only, nothing is
-auto-rewritten.
+auto-rewritten, and it reports gaps rather than inventing experience.
+
+**Resumes download as Word or LaTeX.** Every version exports to a `.docx` laid
+out for applicant tracking systems — no tables, text boxes, or images, since
+those parse badly and cost interviews. If you keep your resume in LaTeX, paste
+the `.tex` in and mark it as your template: readable text is derived from it
+automatically, the assistant reuses your own macros when tailoring, and the
+LaTeX download hands back source you can compile locally or on Overleaf.
 
 ## Setup
 

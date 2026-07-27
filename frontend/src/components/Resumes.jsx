@@ -1,10 +1,53 @@
 import { useState } from 'react'
 import { api } from '../api'
-import { BarRows, Card, Empty, Field, Tags, Tile, label, pct } from './ui'
+import { BarRows, Card, Empty, Field, Tags, Tile, pct } from './ui'
+
+/** Download buttons shared by the table row and the detail panel. */
+function DownloadButtons({ resume, onError, small = true }) {
+  const cls = small ? 'btn small' : 'btn'
+  const go = async (format) => {
+    try {
+      await api.resumes.download(resume.id, format)
+      onError(null)
+    } catch (err) {
+      onError(String(err.message ?? err))
+    }
+  }
+  return (
+    <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
+      <button
+        className={cls}
+        disabled={!resume.content?.trim()}
+        title={
+          resume.content?.trim()
+            ? 'Download a formatted Word document'
+            : 'Add resume text first'
+        }
+        onClick={() => go('docx')}
+      >
+        Word
+      </button>
+      <button
+        className={cls}
+        disabled={!resume.latex_content?.trim()}
+        title={
+          resume.latex_content?.trim()
+            ? 'Download the LaTeX source'
+            : 'No LaTeX source on this version yet'
+        }
+        onClick={() => go('tex')}
+      >
+        LaTeX
+      </button>
+    </span>
+  )
+}
 
 export default function Resumes({ resumes, stats, jobs, reload }) {
   const [expanded, setExpanded] = useState(null)
   const [adding, setAdding] = useState(false)
+  const [downloadError, setDownloadError] = useState(null)
+  const hasLatex = resumes.some((r) => r.latex_content?.trim())
 
   const versionRows = (stats.by_version ?? [])
     .filter((v) => v.applications > 0)
@@ -58,10 +101,23 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
             />
           )}
 
+          {downloadError && (
+            <p className="small" style={{ color: 'var(--critical)' }}>
+              {downloadError}
+            </p>
+          )}
+
+          {hasLatex && (
+            <p className="small muted" style={{ marginTop: -4 }}>
+              LaTeX downloads give you the <code>.tex</code> source — compile it locally or
+              paste it into Overleaf to get the PDF.
+            </p>
+          )}
+
           {resumes.length === 0 ? (
             <Empty>
-              No resume versions yet. Add one with its text, then ask the assistant to tailor it
-              for a specific role.
+              No resume versions yet. Add one with its text or LaTeX source, then ask the
+              assistant to tailor it for a specific role.
             </Empty>
           ) : (
             <table className="table">
@@ -71,7 +127,7 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
                   <th>Target role</th>
                   <th className="num">Sent</th>
                   <th className="num">Reply rate</th>
-                  <th className="num">Tailoring</th>
+                  <th>Download</th>
                 </tr>
               </thead>
               <tbody>
@@ -86,6 +142,7 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
                       open={expanded === resume.id}
                       onToggle={() => setExpanded(expanded === resume.id ? null : resume.id)}
                       reload={reload}
+                      onError={setDownloadError}
                     />
                   )
                 })}
@@ -98,7 +155,7 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
   )
 }
 
-function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload }) {
+function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload, onError }) {
   return (
     <>
       <tr className="clickable" onClick={onToggle}>
@@ -106,16 +163,22 @@ function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload }) {
           <div className="row-main">
             {resume.name}
             {resume.is_master && <span className="tag" style={{ marginLeft: 8 }}>master</span>}
+            {resume.is_latex_template && (
+              <span className="tag" style={{ marginLeft: 6 }}>LaTeX template</span>
+            )}
           </div>
           <div className="row-sub">
             {resume.version_label || 'no label'} · created {resume.created_date}
-            {resume.content ? ` · ${resume.content.length} chars` : ' · no text stored'}
+            {resume.latex_content ? ' · LaTeX' : resume.content ? ' · text' : ' · empty'}
+            {resume.tailoring.length > 0 && ` · ${resume.tailoring.length} tailoring`}
           </div>
         </td>
         <td className="small">{resume.target_role || '—'}</td>
         <td className="num">{versionStats.applications ?? 0}</td>
         <td className="num">{pct(versionStats.response_rate)}</td>
-        <td className="num">{resume.tailoring.length}</td>
+        <td onClick={(e) => e.stopPropagation()}>
+          <DownloadButtons resume={resume} onError={onError} />
+        </td>
       </tr>
       {open && (
         <tr className="detail">
@@ -123,11 +186,38 @@ function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload }) {
             <div style={{ padding: '6px 4px 10px' }}>
               <div className="detail-inner" style={{ padding: 0 }}>
                 <div>
-                  <h4>Resume text</h4>
+                  <h4>LaTeX source</h4>
+                  <textarea
+                    defaultValue={resume.latex_content}
+                    placeholder="Paste your .tex file here. Plain text below is derived from it automatically when left empty."
+                    style={{ minHeight: 140, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+                    onBlur={async (e) => {
+                      if (e.target.value !== resume.latex_content) {
+                        await api.resumes.update(resume.id, { latex_content: e.target.value })
+                        reload()
+                      }
+                    }}
+                  />
+                  <label className="small" style={{ display: 'block', margin: '8px 0' }}>
+                    <input
+                      type="checkbox"
+                      checked={resume.is_latex_template}
+                      onChange={async (e) => {
+                        await api.resumes.update(resume.id, {
+                          is_latex_template: e.target.checked,
+                        })
+                        reload()
+                      }}
+                      style={{ width: 'auto', marginRight: 6 }}
+                    />
+                    Use this as my LaTeX template
+                  </label>
+
+                  <h4 style={{ marginTop: 14 }}>Resume text</h4>
                   <textarea
                     defaultValue={resume.content}
                     placeholder="Paste the resume text here so it can be tailored against a JD"
-                    style={{ minHeight: 160 }}
+                    style={{ minHeight: 140 }}
                     onBlur={async (e) => {
                       if (e.target.value !== resume.content) {
                         await api.resumes.update(resume.id, { content: e.target.value })
@@ -135,6 +225,9 @@ function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload }) {
                       }
                     }}
                   />
+                  <div style={{ marginTop: 10 }}>
+                    <DownloadButtons resume={resume} onError={onError} small={false} />
+                  </div>
                   <div className="field-row" style={{ marginTop: 10 }}>
                     <Field label="Target role">
                       <input
@@ -243,7 +336,9 @@ function ResumeForm({ onSave }) {
     version_label: '',
     target_role: '',
     content: '',
+    latex_content: '',
     is_master: false,
+    is_latex_template: false,
   })
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value })
 
@@ -267,10 +362,18 @@ function ResumeForm({ onSave }) {
           <input value={form.target_role} onChange={set('target_role')} />
         </Field>
       </div>
-      <Field label="Resume text">
-        <textarea value={form.content} onChange={set('content')} style={{ minHeight: 120 }} />
+      <Field label="LaTeX source (optional — plain text is derived from it)">
+        <textarea
+          value={form.latex_content}
+          onChange={set('latex_content')}
+          placeholder="Paste your .tex file here"
+          style={{ minHeight: 110, fontFamily: 'ui-monospace, monospace', fontSize: 12 }}
+        />
       </Field>
-      <label className="small" style={{ display: 'block', marginBottom: 12 }}>
+      <Field label="Resume text">
+        <textarea value={form.content} onChange={set('content')} style={{ minHeight: 110 }} />
+      </Field>
+      <label className="small" style={{ display: 'block', marginBottom: 6 }}>
         <input
           type="checkbox"
           checked={form.is_master}
@@ -278,6 +381,15 @@ function ResumeForm({ onSave }) {
           style={{ width: 'auto', marginRight: 6 }}
         />
         This is a master version
+      </label>
+      <label className="small" style={{ display: 'block', marginBottom: 12 }}>
+        <input
+          type="checkbox"
+          checked={form.is_latex_template}
+          onChange={(e) => setForm({ ...form, is_latex_template: e.target.checked })}
+          style={{ width: 'auto', marginRight: 6 }}
+        />
+        Use this as my LaTeX template
       </label>
       <button
         className="btn primary"
