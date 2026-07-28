@@ -700,9 +700,10 @@ TOOLS = [
 ALLOWED_TOOLS = [f"mcp__{SERVER_NAME}__{t.name}" for t in TOOLS] + ["WebSearch"]
 
 
-def system_prompt() -> str:
-    return f"""You are the assistant for Prerak's personal job-search tracker.
-Today is {date.today().isoformat()}.
+# Deliberately NOT an f-string: the prompt contains LaTeX macro examples full
+# of braces, which an f-string would try to interpolate. The date is the only
+# dynamic part, so it is prepended instead.
+_SYSTEM_PROMPT = """You are the assistant for Prerak's personal job-search tracker.
 
 You maintain four things: job applications, resume versions, DSA practice, and
 system design study. You have tools for all of them — use them rather than just
@@ -790,6 +791,10 @@ Rules:
 - After making changes, reply in one or two sentences saying what you recorded.
   Don't restate the whole record — the dashboard shows it.
 """
+
+
+def system_prompt() -> str:
+    return f"Today is {date.today().isoformat()}.\n\n{_SYSTEM_PROMPT}"
 
 
 def build_options(session_id: str | None) -> ClaudeAgentOptions:
