@@ -18,6 +18,7 @@ import design
 import docx_export
 import dsa
 import latex_export
+import pdf_export
 import resumes
 import storage
 
@@ -283,10 +284,38 @@ def post_resume_link(resume_id: str, job_id: str) -> dict[str, Any]:
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
+@app.get("/api/latex/status")
+def latex_status() -> dict[str, Any]:
+    """Whether a TeX engine is installed, so the UI can explain a missing PDF."""
+    return pdf_export.available()
+
+
 @app.get("/api/resumes/{resume_id}/download")
-def download_resume(resume_id: str, format: str = "docx") -> Response:
-    """Download a resume version as a Word document or LaTeX source."""
+def download_resume(resume_id: str, format: str = "pdf") -> Response:
+    """Download a resume version as PDF, Word, or LaTeX source."""
     resume = _found(resumes.get_resume(resume_id), "Resume")
+
+    if format == "pdf":
+        latex = resume.get("latex_content") or ""
+        if not latex.strip():
+            raise HTTPException(
+                400,
+                "This version has no LaTeX source, so there's nothing to compile. "
+                "Add LaTeX to it, or download the Word version instead.",
+            )
+        try:
+            data = pdf_export.compile_pdf(latex)
+        except pdf_export.LatexNotInstalled as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except pdf_export.LatexCompileError as exc:
+            raise HTTPException(400, f"LaTeX error: {exc}") from exc
+        person = docx_export.parse(resume.get("content", ""))["name"]
+        name = latex_export.filename_for(resume, person).removesuffix(".tex") + ".pdf"
+        return Response(
+            content=data,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
     if format == "tex":
         latex = resume.get("latex_content") or ""
@@ -309,7 +338,7 @@ def download_resume(resume_id: str, format: str = "docx") -> Response:
         )
 
     if format != "docx":
-        raise HTTPException(400, "format must be 'docx' or 'tex'")
+        raise HTTPException(400, "format must be 'pdf', 'docx' or 'tex'")
 
     if not (resume.get("content") or "").strip():
         raise HTTPException(

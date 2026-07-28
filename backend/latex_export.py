@@ -94,6 +94,11 @@ def _header_lines(header: str) -> list[str]:
 
     # Whatever remains is the contact line, usually split across source lines.
     remainder = re.sub(r"\\(begin|end)\s*\{[^}]*\}", " ", header)
+    # Collapse \href{url}{label} first: in real templates the two groups often
+    # straddle a newline, and per-line cleaning would keep both url and label.
+    remainder = re.sub(
+        r"\\href\s*\{[^}]*\}\s*\{([^}]*)\}", r"\1", remainder, flags=re.S
+    )
     # The template puts each contact item on its own source line ending in
     # "$|$", and _clean drops that trailing separator — so rejoin with it.
     pieces = [_clean(part) for part in remainder.split("\n")]

@@ -103,7 +103,16 @@ Jake Gutierrez / sb2nov macros (`\resumeSubheading`, `\resumeItem`, …) to
 readable text. Use `latex_export.escape` for any plain text written *into*
 LaTeX.
 
-`GET /api/resumes/{id}/download?format=docx|tex`.
+`backend/pdf_export.py` compiles LaTeX to PDF with whichever engine is
+installed, preferring `pdflatex` because the template uses `\pdfgentounicode`
+(a pdfTeX primitive the XeTeX engines lack). Compilation runs in a temp
+directory with shell-escape disabled, `openin_any`/`openout_any` restricted,
+and a 120s timeout — a pasted resume must not be able to read or write the
+machine. Two passes, so `\titlerule` and hyperref anchors settle.
+
+`GET /api/resumes/{id}/download?format=pdf|docx|tex` (pdf is the default).
+`GET /api/latex/status` reports whether an engine is present, so the UI can
+explain a disabled PDF button rather than failing silently.
 
 ### `data/dsa.json` — `{"problems": [...]}`
 

@@ -755,16 +755,29 @@ How to handle common messages:
   detail lines each start with "- ". Use blank lines between blocks. Do not
   use markdown, asterisks, or "•" characters — plain text only.
 
-  LaTeX: if any stored version has latex_content (check has_latex via
-  list_resumes, and prefer the one with is_latex_template set), the user works
-  in LaTeX. Read that version with get_resume and produce the tailored version
-  as latex_content too, reusing the template's preamble and macros
-  (\\resumeSubheading, \\resumeItem, \\resumeSubHeadingListStart, and so on)
-  exactly as they are defined there — only the content between them changes.
-  Keep \\pdfgentounicode=1 so the compiled PDF stays ATS-parsable, and escape
-  &, %, $, #, and _ as \\&, \\%, \\$, \\#, \\_ inside any text you write.
-  Set both content and latex_content on the new version so the Word and LaTeX
-  downloads agree.
+  LaTeX is the primary format. If any stored version has latex_content (check
+  has_latex via list_resumes, and prefer the one with is_latex_template set),
+  read it with get_resume and produce the tailored version as latex_content —
+  this is what the PDF download compiles, so treat it as the real deliverable
+  and set it whenever a template exists.
+
+  Copy the template's entire preamble verbatim: the documentclass, every
+  \\usepackage, the margin and \\titleformat settings, \\pdfgentounicode=1
+  (which keeps the PDF ATS-parsable), and all the \\newcommand definitions.
+  Then reuse its macros for the body rather than inventing layout:
+    \\section{...}                             a section
+    \\resumeSubHeadingListStart / ...End       wraps a group of entries
+    \\resumeSubheading{org}{right}{role}{date} an employer or qualification
+    \\resumeProjectHeading{name}{right}        a project
+    \\resumeItemListStart / ...End             wraps the bullets
+    \\resumeItem{...}                          one bullet
+  Keep the section order the template uses, and keep every section it has
+  (Education, Work Experience, Projects, Skills & Certifications) unless the
+  user asks otherwise — only the wording inside changes.
+
+  Escape &, %, $, #, and _ as \\&, \\%, \\$, \\#, \\_ in anything you write,
+  and end the document with \\end{document}. Set content (plain text) as well
+  as latex_content so the Word download and the dashboard preview agree.
 - DSA or system design activity -> record it with the timings, and always log
   the issue when the user says something was hard or went wrong. The issue log
   is the most valuable part of that data.

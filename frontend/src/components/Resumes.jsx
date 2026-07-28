@@ -1,43 +1,57 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { BarRows, Card, Empty, Field, Tags, Tile, pct } from './ui'
 
 /** Download buttons shared by the table row and the detail panel. */
-function DownloadButtons({ resume, onError, small = true }) {
+function DownloadButtons({ resume, onError, latex, small = true }) {
   const cls = small ? 'btn small' : 'btn'
+  const [busy, setBusy] = useState(false)
+  const hasLatex = Boolean(resume.latex_content?.trim())
+  const hasText = Boolean(resume.content?.trim())
+
   const go = async (format) => {
+    setBusy(true)
+    onError(null)
     try {
       await api.resumes.download(resume.id, format)
-      onError(null)
     } catch (err) {
       onError(String(err.message ?? err))
+    } finally {
+      setBusy(false)
     }
   }
+
+  const pdfTitle = !hasLatex
+    ? 'Add LaTeX source to this version to compile a PDF'
+    : latex && !latex.ok
+      ? 'No LaTeX engine installed — see the note above'
+      : 'Compile the LaTeX to PDF'
+
   return (
     <span style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
       <button
+        className={`${cls} ${small ? '' : 'primary'}`}
+        disabled={busy || !hasLatex || (latex ? !latex.ok : false)}
+        title={pdfTitle}
+        onClick={() => go('pdf')}
+      >
+        {busy ? '…' : 'PDF'}
+      </button>
+      <button
         className={cls}
-        disabled={!resume.content?.trim()}
-        title={
-          resume.content?.trim()
-            ? 'Download a formatted Word document'
-            : 'Add resume text first'
-        }
+        disabled={busy || !hasText}
+        title={hasText ? 'Download a formatted Word document' : 'Add resume text first'}
         onClick={() => go('docx')}
       >
         Word
       </button>
       <button
         className={cls}
-        disabled={!resume.latex_content?.trim()}
-        title={
-          resume.latex_content?.trim()
-            ? 'Download the LaTeX source'
-            : 'No LaTeX source on this version yet'
-        }
+        disabled={busy || !hasLatex}
+        title={hasLatex ? 'Download the LaTeX source' : 'No LaTeX source on this version yet'}
         onClick={() => go('tex')}
       >
-        LaTeX
+        .tex
       </button>
     </span>
   )
@@ -47,7 +61,12 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
   const [expanded, setExpanded] = useState(null)
   const [adding, setAdding] = useState(false)
   const [downloadError, setDownloadError] = useState(null)
+  const [latex, setLatex] = useState(null)
   const hasLatex = resumes.some((r) => r.latex_content?.trim())
+
+  useEffect(() => {
+    api.latexStatus().then(setLatex).catch(() => setLatex({ ok: false }))
+  }, [])
 
   const versionRows = (stats.by_version ?? [])
     .filter((v) => v.applications > 0)
@@ -107,10 +126,15 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
             </p>
           )}
 
-          {hasLatex && (
+          {hasLatex && latex && !latex.ok && (
+            <p className="small" style={{ marginTop: -4, color: 'var(--serious)' }}>
+              PDF is unavailable: {latex.hint} Until then, use the <code>.tex</code>{' '}
+              download with Overleaf, or the Word version.
+            </p>
+          )}
+          {hasLatex && latex?.ok && (
             <p className="small muted" style={{ marginTop: -4 }}>
-              LaTeX downloads give you the <code>.tex</code> source — compile it locally or
-              paste it into Overleaf to get the PDF.
+              PDFs are compiled locally from your LaTeX with {latex.engine}.
             </p>
           )}
 
@@ -143,6 +167,7 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
                       onToggle={() => setExpanded(expanded === resume.id ? null : resume.id)}
                       reload={reload}
                       onError={setDownloadError}
+                      latex={latex}
                     />
                   )
                 })}
@@ -155,7 +180,7 @@ export default function Resumes({ resumes, stats, jobs, reload }) {
   )
 }
 
-function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload, onError }) {
+function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload, onError, latex }) {
   return (
     <>
       <tr className="clickable" onClick={onToggle}>
@@ -177,7 +202,7 @@ function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload, onError
         <td className="num">{versionStats.applications ?? 0}</td>
         <td className="num">{pct(versionStats.response_rate)}</td>
         <td onClick={(e) => e.stopPropagation()}>
-          <DownloadButtons resume={resume} onError={onError} />
+          <DownloadButtons resume={resume} onError={onError} latex={latex} />
         </td>
       </tr>
       {open && (
@@ -226,7 +251,7 @@ function ResumeRow({ resume, versionStats, jobs, open, onToggle, reload, onError
                     }}
                   />
                   <div style={{ marginTop: 10 }}>
-                    <DownloadButtons resume={resume} onError={onError} small={false} />
+                    <DownloadButtons resume={resume} onError={onError} latex={latex} small={false} />
                   </div>
                   <div className="field-row" style={{ marginTop: 10 }}>
                     <Field label="Target role">

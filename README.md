@@ -28,12 +28,17 @@ tailor a resume against a stored job description and it lists the missing
 keywords and concrete per-section rewrites — advisory only, nothing is
 auto-rewritten, and it reports gaps rather than inventing experience.
 
-**Resumes download as Word or LaTeX.** Every version exports to a `.docx` laid
-out for applicant tracking systems — no tables, text boxes, or images, since
-those parse badly and cost interviews. If you keep your resume in LaTeX, paste
-the `.tex` in and mark it as your template: readable text is derived from it
-automatically, the assistant reuses your own macros when tailoring, and the
-LaTeX download hands back source you can compile locally or on Overleaf.
+**Resumes download as PDF, Word, or LaTeX.** If you keep your resume in LaTeX,
+paste the `.tex` in and mark it as your template. The assistant then reuses
+your own preamble and macros when tailoring, and the **PDF button compiles it
+locally** — the same output you'd get from Overleaf, without leaving the app.
+Readable text is derived from the LaTeX automatically, so the Word export and
+the dashboard preview work too. The `.docx` is laid out for applicant tracking
+systems — no tables, text boxes, or images, since those parse badly and cost
+interviews.
+
+PDF export needs a TeX engine (`pdflatex` from MiKTeX or TinyTeX). Without one
+the button explains what's missing and the `.tex` and Word downloads still work.
 
 ## Setup
 

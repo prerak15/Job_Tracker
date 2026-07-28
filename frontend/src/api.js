@@ -25,6 +25,7 @@ const del = (p) => request(p, { method: 'DELETE' })
 export const api = {
   meta: () => get('/meta'),
   overview: () => get('/overview'),
+  latexStatus: () => get('/latex/status'),
 
   jobs: {
     list: () => get('/jobs'),
