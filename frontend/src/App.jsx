@@ -26,6 +26,8 @@ const EMPTY = {
   topics: [],
   designStats: {},
   designQueue: [],
+  prep: { phases: [], standing_issues: [], profile: {} },
+  readiness: {},
 }
 
 export default function App() {
@@ -58,6 +60,8 @@ export default function App() {
         topics,
         designStats,
         designQueue,
+        prep,
+        readiness,
       ] = await Promise.all([
         api.meta(),
         api.jobs.list(),
@@ -71,6 +75,8 @@ export default function App() {
         api.design.list(),
         api.design.stats(),
         api.design.revisionQueue(),
+        api.prep.get(),
+        api.prep.readiness(),
       ])
       setData({
         meta,
@@ -85,6 +91,8 @@ export default function App() {
         topics,
         designStats,
         designQueue,
+        prep,
+        readiness,
       })
       setError(null)
     } catch (err) {
@@ -165,8 +173,11 @@ export default function App() {
                   problems={data.problems}
                   stats={data.dsaStats}
                   queue={data.dsaQueue}
+                  prep={data.prep}
+                  readiness={data.readiness}
                   meta={data.meta}
                   reload={reload}
+                  askAssistant={askAssistant}
                 />
               )}
               {tab === 'design' && (

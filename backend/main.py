@@ -19,6 +19,7 @@ import docx_export
 import dsa
 import latex_export
 import pdf_export
+import prep
 import resumes
 import storage
 
@@ -373,6 +374,9 @@ class ProblemIn(BaseModel):
     attempts: int = 0
     used_hint: bool = False
     solution_notes: str = ""
+    time_complexity: str = ""
+    space_complexity: str = ""
+    phase: str | None = None
     confidence: int | None = None
     company_tags: list[str] = Field(default_factory=list)
     linked_job_id: str | None = None
@@ -391,6 +395,9 @@ class ProblemPatch(BaseModel):
     attempts: int | None = None
     used_hint: bool | None = None
     solution_notes: str | None = None
+    time_complexity: str | None = None
+    space_complexity: str | None = None
+    phase: str | None = None
     confidence: int | None = None
     company_tags: list[str] | None = None
     linked_job_id: str | None = None
@@ -425,6 +432,11 @@ def get_dsa_stats() -> dict[str, Any]:
 @app.get("/api/dsa/revision-queue")
 def get_dsa_revision_queue() -> list[dict[str, Any]]:
     return dsa.revision_queue()
+
+
+@app.get("/api/dsa/missing-complexity")
+def get_dsa_missing_complexity() -> list[dict[str, Any]]:
+    return dsa.missing_complexity()
 
 
 @app.get("/api/dsa/{problem_id}")
@@ -564,6 +576,116 @@ def post_design_artifact(topic_id: str, payload: ArtifactIn) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# interview prep profile
+# --------------------------------------------------------------------------
+
+
+class ProfilePatch(BaseModel):
+    target_levels: list[str] | None = None
+    target_companies: list[str] | None = None
+    current_phase: str | None = None
+    current_milestone: str | None = None
+    notes: str | None = None
+
+
+class PhaseIn(BaseModel):
+    key: str
+    name: str
+    status: str = "upcoming"
+    order: int = 0
+    topics: list[str] = Field(default_factory=list)
+    milestone: str = ""
+
+
+class PhaseStatusIn(BaseModel):
+    status: Literal["completed", "current", "upcoming"]
+
+
+class MilestoneIn(BaseModel):
+    milestone: str
+    phase_key: str | None = None
+
+
+class StandingIssueIn(BaseModel):
+    issue: str
+    category: str = "logic"
+    date: str | None = None
+
+
+class FlagIssueIn(BaseModel):
+    date: str | None = None
+    problem_id: str | None = None
+
+
+@app.get("/api/prep")
+def get_prep() -> dict[str, Any]:
+    return prep.get_prep()
+
+
+@app.get("/api/prep/stats")
+def get_prep_stats() -> dict[str, Any]:
+    return prep.stats()
+
+
+@app.get("/api/prep/readiness")
+def get_readiness() -> dict[str, Any]:
+    """Cross-domain: scheduled rounds vs. what's still shaky."""
+    return prep.readiness()
+
+
+@app.patch("/api/prep/profile")
+def patch_profile(payload: ProfilePatch) -> dict[str, Any]:
+    return prep.update_profile(payload.model_dump(exclude_unset=True))
+
+
+@app.post("/api/prep/phases")
+def post_phase(payload: PhaseIn) -> dict[str, Any]:
+    return prep.upsert_phase(payload.model_dump())
+
+
+@app.patch("/api/prep/phases/{phase_key}")
+def patch_phase_status(phase_key: str, payload: PhaseStatusIn) -> dict[str, Any]:
+    return _found(prep.set_phase_status(phase_key, payload.status), "Phase")
+
+
+@app.post("/api/prep/milestone")
+def post_milestone(payload: MilestoneIn) -> dict[str, Any]:
+    return prep.set_milestone(payload.milestone, payload.phase_key)
+
+
+@app.get("/api/prep/standing-issues")
+def get_standing_issues(active_only: bool = False) -> list[dict[str, Any]]:
+    return prep.list_standing_issues(active_only)
+
+
+@app.post("/api/prep/standing-issues", status_code=201)
+def post_standing_issue(payload: StandingIssueIn) -> dict[str, Any]:
+    try:
+        return prep.add_standing_issue(payload.issue, payload.category, payload.date)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/prep/standing-issues/{issue_id}/flag")
+def post_flag_issue(issue_id: str, payload: FlagIssueIn) -> dict[str, Any]:
+    return _found(
+        prep.flag_standing_issue(issue_id, payload.date, payload.problem_id),
+        "Standing issue",
+    )
+
+
+@app.post("/api/prep/standing-issues/{issue_id}/resolve")
+def post_resolve_issue(issue_id: str) -> dict[str, Any]:
+    return _found(prep.resolve_standing_issue(issue_id), "Standing issue")
+
+
+@app.delete("/api/prep/standing-issues/{issue_id}", status_code=204)
+def remove_standing_issue(issue_id: str) -> None:
+    if not prep.delete_standing_issue(issue_id):
+        raise HTTPException(404, "Standing issue not found")
+
+
+# --------------------------------------------------------------------------
 # meta + overview
 # --------------------------------------------------------------------------
 
@@ -583,6 +705,8 @@ def get_meta() -> dict[str, Any]:
         "design_kinds": design.KINDS,
         "design_statuses": design.DESIGN_STATUSES,
         "artifact_types": design.ARTIFACT_TYPES,
+        "phase_statuses": prep.PHASE_STATUSES,
+        "standing_issue_categories": prep.ISSUE_CATEGORIES,
     }
 
 
@@ -594,6 +718,7 @@ def get_overview() -> dict[str, Any]:
         "dsa": dsa.stats(),
         "design": design.stats(),
         "resumes": resumes.stats(),
+        "prep": prep.stats(),
         "followups_due": len(storage.followup_suggestions()),
     }
 

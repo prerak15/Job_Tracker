@@ -49,7 +49,110 @@ export function RevisionQueue({ items, onRevisit }) {
 
 // ---------------------------------------------------------------- DSA
 
-export default function Dsa({ problems, stats, queue, meta, reload }) {
+/** Curriculum phases. Status carries the meaning, so it is spelled out in a
+ *  label rather than encoded as colour alone. */
+function Curriculum({ prep, askAssistant }) {
+  const phases = prep?.phases ?? []
+  if (!phases.length) {
+    return <p className="muted small">No curriculum phases set up yet.</p>
+  }
+  const milestone = prep?.profile?.current_milestone
+  return (
+    <div className="rows">
+      {milestone && (
+        <p className="small muted" style={{ marginBottom: 4 }}>
+          Milestone: {milestone}
+        </p>
+      )}
+      {phases.map((phase) => (
+        <div
+          key={phase.key}
+          style={{ paddingBottom: 9, borderBottom: '1px solid var(--grid)' }}
+        >
+          <div style={{ display: 'flex', gap: 10, alignItems: 'baseline' }}>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span className="row-main" style={{ fontSize: 13 }}>
+                {phase.name}
+              </span>
+            </span>
+            <Pill>{phase.status}</Pill>
+            <span className="row-value">
+              {phase.solved}/{phase.problems}
+            </span>
+          </div>
+          {phase.topics?.length > 0 && (
+            <div className="row-sub">{phase.topics.join(' · ')}</div>
+          )}
+        </div>
+      ))}
+      {askAssistant && (
+        <button
+          className="btn small"
+          style={{ marginTop: 4, alignSelf: 'flex-start' }}
+          onClick={() => askAssistant('Give me the next problem for my current milestone.')}
+        >
+          Next problem
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Standing weaknesses — habits that recur across problems, as opposed to the
+ *  per-problem issues log. Sorted most-recurrent first by the backend. */
+function StandingIssues({ issues, reload }) {
+  const active = issues.filter((i) => i.active)
+  if (!active.length) {
+    return <p className="muted small">No standing weaknesses tracked.</p>
+  }
+  return (
+    <div className="rows">
+      {active.map((item) => (
+        <div
+          key={item.id}
+          style={{
+            display: 'flex',
+            gap: 10,
+            alignItems: 'baseline',
+            paddingBottom: 9,
+            borderBottom: '1px solid var(--grid)',
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="row-main" style={{ fontSize: 13 }}>
+              {item.issue}
+            </div>
+            <div className="row-sub">
+              {label(item.category)}
+              {item.seen_on.length > 0 && ` · seen ${item.seen_on.length}×`}
+            </div>
+          </div>
+          <button
+            className="btn small ghost"
+            title="Mark this habit as beaten"
+            onClick={async () => {
+              await api.prep.resolveStandingIssue(item.id)
+              reload()
+            }}
+          >
+            Beaten
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export default function Dsa({
+  problems,
+  stats,
+  queue,
+  prep,
+  readiness,
+  meta,
+  reload,
+  askAssistant,
+}) {
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState('all')
   const [expanded, setExpanded] = useState(null)
@@ -75,6 +178,8 @@ export default function Dsa({ problems, stats, queue, meta, reload }) {
     rate: stats.by_difficulty?.[d]?.solve_rate ?? 0,
   }))
 
+  const activeStanding = (prep?.standing_issues ?? []).filter((i) => i.active)
+
   const topicRows = Object.entries(stats.by_topic ?? {})
     .map(([k, v]) => ({ label: k, value: v.total, solved: v.solved, rate: v.solve_rate }))
     .sort((a, b) => b.value - a.value)
@@ -89,6 +194,20 @@ export default function Dsa({ problems, stats, queue, meta, reload }) {
         <Tile label="Hint rate" value={pct(stats.hint_rate)} note="of solved problems" />
         <Tile label="Per week" value={stats.solved_per_week ?? 0} note="last 4 weeks" />
         <Tile label="Due for revision" value={stats.revision_due ?? 0} note={`${stats.issues_logged ?? 0} issues logged`} />
+        <Tile
+          label="Standing weaknesses"
+          value={activeStanding.length}
+          note={
+            readiness?.next_round_in_days != null
+              ? `next round in ${readiness.next_round_in_days}d`
+              : 'recurring habits'
+          }
+        />
+        <Tile
+          label="No complexity"
+          value={stats.missing_complexity ?? 0}
+          note="solved but unanalysed"
+        />
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' }}>
@@ -108,6 +227,17 @@ export default function Dsa({ problems, stats, queue, meta, reload }) {
               reload()
             }}
           />
+        </Card>
+
+        <Card title="Curriculum" sub="Phases and where you are in them">
+          <Curriculum prep={prep} askAssistant={askAssistant} />
+        </Card>
+
+        <Card
+          title="Standing weaknesses"
+          sub="Habits that recur across problems, most frequent first"
+        >
+          <StandingIssues issues={prep?.standing_issues ?? []} reload={reload} />
         </Card>
 
         <Card title="Topics" sub="Coverage by tag — the widest gaps are worth drilling">
@@ -217,6 +347,7 @@ function ProblemRow({ problem, meta, open, onToggle, reload }) {
           <div className="row-sub">
             {label(problem.platform)}
             {problem.topics.length > 0 && ` · ${problem.topics.join(', ')}`}
+            {problem.time_complexity && ` · ${problem.time_complexity}`}
           </div>
         </td>
         <td>
@@ -286,6 +417,32 @@ function ProblemRow({ problem, meta, open, onToggle, reload }) {
                           confidence: Number(e.target.value) || null,
                         })
                         reload()
+                      }}
+                    />
+                  </Field>
+                </div>
+                <div className="field-row">
+                  <Field label="Time complexity">
+                    <input
+                      defaultValue={problem.time_complexity}
+                      placeholder="O(n \log n)"
+                      onBlur={async (e) => {
+                        if (e.target.value !== problem.time_complexity) {
+                          await api.dsa.update(problem.id, { time_complexity: e.target.value })
+                          reload()
+                        }
+                      }}
+                    />
+                  </Field>
+                  <Field label="Space complexity">
+                    <input
+                      defaultValue={problem.space_complexity}
+                      placeholder="O(h)"
+                      onBlur={async (e) => {
+                        if (e.target.value !== problem.space_complexity) {
+                          await api.dsa.update(problem.id, { space_complexity: e.target.value })
+                          reload()
+                        }
                       }}
                     />
                   </Field>

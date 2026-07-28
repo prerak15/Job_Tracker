@@ -76,6 +76,9 @@ const PILL_TONE = {
   cleared: 'green',
   pending: '',
   waiting: '',
+  completed: 'green',
+  current: 'orange',
+  upcoming: '',
 }
 
 export function Pill({ children, tone }) {

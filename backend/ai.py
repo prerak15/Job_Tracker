@@ -30,6 +30,7 @@ from claude_agent_sdk import (
 
 import design
 import dsa
+import prep
 import resumes
 import storage
 
@@ -57,6 +58,21 @@ STR = {"type": "string"}
 INT = {"type": "integer"}
 BOOL = {"type": "boolean"}
 STR_LIST = {"type": "array", "items": {"type": "string"}}
+
+# LaTeX math without the delimiters, so it renders in the dashboard and pastes
+# straight into a write-up.
+TIME_COMPLEXITY = {
+    "type": "string",
+    "description": r"Time complexity as LaTeX, no delimiters, e.g. O(n \log n)",
+}
+SPACE_COMPLEXITY = {
+    "type": "string",
+    "description": r"Space complexity as LaTeX, no delimiters, e.g. O(h) for recursion depth",
+}
+PHASE = {
+    "type": "string",
+    "description": "Curriculum phase key from get_prep_profile, e.g. phase_2",
+}
 
 
 def _brief_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +466,9 @@ async def list_problems_tool(args: dict[str, Any]) -> dict[str, Any]:
             "attempts": INT,
             "used_hint": BOOL,
             "solution_notes": STR,
+            "time_complexity": TIME_COMPLEXITY,
+            "space_complexity": SPACE_COMPLEXITY,
+            "phase": PHASE,
             "confidence": {**INT, "description": "1-5, how solid it feels"},
             "company_tags": STR_LIST,
         },
@@ -475,6 +494,9 @@ async def add_problem_tool(args: dict[str, Any]) -> dict[str, Any]:
             "attempts": INT,
             "used_hint": BOOL,
             "solution_notes": STR,
+            "time_complexity": TIME_COMPLEXITY,
+            "space_complexity": SPACE_COMPLEXITY,
+            "phase": PHASE,
             "confidence": INT,
             "date_completed": STR,
             "url": STR,
@@ -534,6 +556,129 @@ async def dsa_stats_tool(_: dict[str, Any]) -> dict[str, Any]:
 )
 async def dsa_revision_tool(_: dict[str, Any]) -> dict[str, Any]:
     return _ok(dsa.revision_queue())
+
+
+# --------------------------------------------------------------------------
+# interview prep tools (curriculum + standing weaknesses)
+# --------------------------------------------------------------------------
+
+
+@tool(
+    "get_prep_profile",
+    "The interview-prep profile: target levels and companies, the curriculum "
+    "phases with per-phase solve rates, the current milestone, and the standing "
+    "weakness checklist. Read this before presenting a new problem.",
+    schema({}),
+)
+async def get_prep_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(prep.get_prep())
+
+
+@tool(
+    "get_prep_stats",
+    "Curriculum progress and standing-weakness counts, including which habits "
+    "recur most often.",
+    schema({}),
+)
+async def prep_stats_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(prep.stats())
+
+
+@tool(
+    "get_interview_readiness",
+    "Cross-domain check: interview rounds coming up, which live applications "
+    "have no prep tagged against them, what is stuck, and what is due for "
+    "revision. Use this for 'am I ready' or 'what should I work on' questions.",
+    schema({}),
+)
+async def readiness_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(prep.readiness())
+
+
+@tool(
+    "set_prep_milestone",
+    "Set the current milestone within the active curriculum phase.",
+    schema({"milestone": STR, "phase_key": STR}, ["milestone"]),
+)
+async def set_milestone_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok(prep.set_milestone(args["milestone"], args.get("phase_key")))
+
+
+@tool(
+    "set_prep_phase_status",
+    "Mark a curriculum phase completed, current, or upcoming. Setting one "
+    "current automatically demotes the previous current phase.",
+    schema(
+        {"phase_key": STR, "status": {"type": "string", "enum": prep.PHASE_STATUSES}},
+        ["phase_key", "status"],
+    ),
+)
+async def set_phase_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        result = prep.set_phase_status(args["phase_key"], args["status"])
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok(result) if result else _err("No phase with that key.")
+
+
+@tool(
+    "list_standing_issues",
+    "The standing weakness checklist — recurring habits, not one-off mistakes. "
+    "Check these against a submission before giving feedback.",
+    schema({"active_only": BOOL}),
+)
+async def list_standing_issues_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok(prep.list_standing_issues(bool(args.get("active_only"))))
+
+
+@tool(
+    "add_standing_issue",
+    "Add a habit to the standing weakness checklist. Use this only for mistakes "
+    "that have shown up on more than one problem — a one-off belongs in "
+    "log_dsa_issue instead.",
+    schema(
+        {
+            "issue": STR,
+            "category": {"type": "string", "enum": prep.ISSUE_CATEGORIES},
+            "date": STR,
+        },
+        ["issue"],
+    ),
+)
+async def add_standing_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        record = prep.add_standing_issue(
+            args["issue"], args.get("category", "logic"), args.get("date")
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok({"id": record["id"], "issue": record["issue"]})
+
+
+@tool(
+    "flag_standing_issue",
+    "Record that a known standing weakness resurfaced on a problem. This drives "
+    "the recurrence count, so flag it every time it happens.",
+    schema({"issue_id": STR, "problem_id": STR, "date": STR}, ["issue_id"]),
+)
+async def flag_standing_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
+    record = prep.flag_standing_issue(
+        args["issue_id"], args.get("date"), args.get("problem_id")
+    )
+    if not record:
+        return _err("No standing issue with that id.")
+    return _ok({"id": record["id"], "times_seen": len(record["seen_on"])})
+
+
+@tool(
+    "resolve_standing_issue",
+    "Mark a standing weakness as beaten — only after it has stayed absent across "
+    "several submissions, not on the first clean one.",
+    schema({"issue_id": STR, "date": STR}, ["issue_id"]),
+)
+async def resolve_standing_issue_tool(args: dict[str, Any]) -> dict[str, Any]:
+    record = prep.resolve_standing_issue(args["issue_id"], args.get("date"))
+    return _ok({"resolved": True}) if record else _err("No standing issue with that id.")
 
 
 # --------------------------------------------------------------------------
@@ -689,6 +834,15 @@ TOOLS = [
     log_dsa_revisit_tool,
     dsa_stats_tool,
     dsa_revision_tool,
+    get_prep_tool,
+    prep_stats_tool,
+    readiness_tool,
+    set_milestone_tool,
+    set_phase_tool,
+    list_standing_issues_tool,
+    add_standing_issue_tool,
+    flag_standing_issue_tool,
+    resolve_standing_issue_tool,
     list_design_tool,
     add_design_tool,
     update_design_tool,
@@ -729,6 +883,10 @@ How to handle common messages:
   with the feedback the user gives.
 - "Who should I follow up with?" -> get_followup_suggestions, then answer with
   the organisations, how long they've been quiet, and who the contact is.
+- "What should I work on?" / "Am I ready?" -> get_interview_readiness. Lead
+  with the nearest scheduled round and how many days away it is, then what is
+  stuck, then what is due for revision. If a live application has no practice
+  tagged against it, say so — that is the gap worth closing first.
 - A resume tailoring request ("what should I change") -> get_job for the JD,
   get_resume for the text, compare them yourself, then save_resume_tailoring.
 - A resume *generation* request ("generate a resume for this job") -> get_job
@@ -781,7 +939,46 @@ How to handle common messages:
   as latex_content so the Word download and the dashboard preview agree.
 - DSA or system design activity -> record it with the timings, and always log
   the issue when the user says something was hard or went wrong. The issue log
-  is the most valuable part of that data.
+  is the most valuable part of that data. Record time_complexity and
+  space_complexity as LaTeX without delimiters (O(n \\log n), O(h)) whenever
+  the user states them, and tag the problem with the curriculum phase it
+  belongs to.
+
+Interview mode — when Prerak asks for a problem, submits a solution, or asks to
+be interviewed, act as a FAANG coding interviewer calibrated to SWE2 (L3/E3)
+and SWE3 (L4/E4) at Google, Meta and Apple. Read get_prep_profile first so you
+know the current phase, milestone, and standing weaknesses.
+
+  Presenting a problem:
+  - Give the LeetCode number and title. Nothing else.
+  - No description, no function signature, no test harness, no edge cases, no
+    starter template, no hints. He reads the problem on LeetCode himself.
+  - Never volunteer a solution or an approach alongside the problem.
+  - Pick it from the current phase and milestone unless he asks otherwise, and
+    record it with add_dsa_problem as status in_progress and the right phase.
+
+  Hints — only when he explicitly asks. Give one minimal nudge aimed at the
+  specific place his logic broke: a guiding question or a single conceptual
+  pointer. Never the solution, never the full approach. Then set used_hint.
+
+  Grading a submission — evaluate against all of:
+  - correctness
+  - optimal time complexity
+  - optimal space complexity
+  - complexity analysis stated in LaTeX
+  - code cleanliness and modularity
+  - boundary and edge-case handling
+  - architectural trade-offs (recursion vs iteration, and why)
+
+  Then write it down: update_dsa_problem with status, attempts, confidence and
+  both complexities; log_dsa_issue for anything that went wrong this time.
+  Cross-check the submission against list_standing_issues — if a known habit
+  reappeared, call flag_standing_issue so the recurrence count is real. If a
+  new mistake shows up that he has now made on more than one problem, promote
+  it with add_standing_issue. Only resolve_standing_issue after it has stayed
+  absent across several submissions, not on the first clean one.
+
+  Keep feedback scannable, direct and concise.
 
 Rules:
 - Look up ids with the list_ tools before updating; never guess an id.

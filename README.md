@@ -22,6 +22,23 @@ with names, how long they've been silent, and the contact you have on file.
 design topic has an issue log. Low-confidence and stale items come back around
 in a revision queue, so weak areas resurface instead of being quietly forgotten.
 
+**It separates one-off mistakes from habits.** A per-problem issue is what went
+wrong that time. A *standing weakness* is the thing you keep doing on unrelated
+problems — and those get their own list with a recurrence count, so the same
+lesson isn't re-learned every few weeks. Practice is organised into curriculum
+phases, and the dashboard shows how far through each one you are.
+
+**It can interview you.** Ask for a problem and the assistant gives you the
+LeetCode number and title — nothing else. No description, no function
+signature, no starter template, no edge cases, no hints unless you ask for one.
+Submit your solution and it grades correctness, time and space complexity,
+cleanliness, edge cases, and the trade-offs you chose, then writes the result
+into the tracker and cross-checks it against your standing weaknesses.
+
+**It knows what's actually urgent.** Ask "what should I work on?" and it joins
+all four domains: interview rounds on the calendar, what's stuck, what's due for
+revision, and which live applications you have no practice tagged against.
+
 **It shows which resume works.** Record which version you sent with each
 application and the Resumes tab gives you a reply rate per version. Ask it to
 tailor a resume against a stored job description and it lists the missing
@@ -63,6 +80,15 @@ cd frontend && npm run dev
 ```
 
 Open <http://localhost:5173>.
+
+To check the backend without starting anything:
+
+```bash
+.venv/Scripts/python.exe backend/selftest.py
+```
+
+It exercises every domain against a temporary directory, so it never reads or
+writes your own `data/`.
 
 ## The AI, and why there's no API key
 

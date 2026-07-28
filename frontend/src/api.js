@@ -81,8 +81,25 @@ export const api = {
     remove: (id) => del(`/dsa/${id}`),
     stats: () => get('/dsa/stats'),
     revisionQueue: () => get('/dsa/revision-queue'),
+    missingComplexity: () => get('/dsa/missing-complexity'),
     logIssue: (id, body) => post(`/dsa/${id}/issue`, body),
     logRevisit: (id, body) => post(`/dsa/${id}/revisit`, body),
+  },
+
+  prep: {
+    get: () => get('/prep'),
+    stats: () => get('/prep/stats'),
+    readiness: () => get('/prep/readiness'),
+    updateProfile: (body) => patch('/prep/profile', body),
+    upsertPhase: (body) => post('/prep/phases', body),
+    setPhaseStatus: (key, status) => patch(`/prep/phases/${key}`, { status }),
+    setMilestone: (body) => post('/prep/milestone', body),
+    standingIssues: (activeOnly = false) =>
+      get(`/prep/standing-issues${activeOnly ? '?active_only=true' : ''}`),
+    addStandingIssue: (body) => post('/prep/standing-issues', body),
+    flagStandingIssue: (id, body) => post(`/prep/standing-issues/${id}/flag`, body),
+    resolveStandingIssue: (id) => post(`/prep/standing-issues/${id}/resolve`),
+    removeStandingIssue: (id) => del(`/prep/standing-issues/${id}`),
   },
 
   design: {

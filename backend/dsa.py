@@ -40,6 +40,14 @@ _DEFAULTS: dict[str, Any] = {
     "used_hint": False,
     "issues": [],
     "solution_notes": "",
+    # Complexity is graded in every FAANG loop, so it is a first-class field
+    # rather than prose buried in solution_notes. Stored as LaTeX math without
+    # the delimiters -- "O(n \\log n)" -- so it renders in the dashboard and
+    # pastes straight into a write-up.
+    "time_complexity": "",
+    "space_complexity": "",
+    # Which curriculum phase in prep.json this problem belongs to.
+    "phase": None,
     "confidence": None,
     "revisits": [],
     "company_tags": [],
@@ -176,6 +184,10 @@ def _last_touched(problem: dict[str, Any]) -> date | None:
     return max(real) if real else None
 
 
+def _has_complexity(problem: dict[str, Any]) -> bool:
+    return bool(problem.get("time_complexity")) and bool(problem.get("space_complexity"))
+
+
 def _days_to_solve(problem: dict[str, Any]) -> int | None:
     started = parse_date(problem.get("date_started"))
     done = parse_date(problem.get("date_completed"))
@@ -230,6 +242,19 @@ def stats() -> dict[str, Any]:
         key=lambda t: (t["solve_rate"], -(t["issues"] + t["stuck"] + t["hints"])),
     )[:5]
 
+    by_phase: dict[str, dict[str, Any]] = {}
+    for problem in problems:
+        bucket = by_phase.setdefault(
+            problem["phase"] or "unassigned", {"total": 0, "solved": 0, "stuck": 0}
+        )
+        bucket["total"] += 1
+        if problem["status"] in SOLVED_STATUSES:
+            bucket["solved"] += 1
+        if problem["status"] == "stuck":
+            bucket["stuck"] += 1
+    for bucket in by_phase.values():
+        bucket["solve_rate"] = pct(bucket["solved"], bucket["total"])
+
     times = [p["time_spent_minutes"] for p in solved if p.get("time_spent_minutes")]
     attempts = [p["attempts"] for p in solved if p.get("attempts")]
     spans = [d for d in (_days_to_solve(p) for p in solved) if d is not None]
@@ -251,7 +276,11 @@ def stats() -> dict[str, Any]:
         "status_percentages": {k: pct(v, total) for k, v in by_status.items()},
         "by_difficulty": by_difficulty,
         "by_topic": dict(sorted(topics.items())),
+        "by_phase": dict(sorted(by_phase.items())),
         "weak_topics": weak_topics,
+        # A solve with no complexity stated is an incomplete rep by FAANG
+        # standards, so it gets counted rather than passing silently.
+        "missing_complexity": sum(1 for p in solved if not _has_complexity(p)),
         "avg_time_minutes": round(sum(times) / len(times), 1) if times else 0,
         "avg_attempts": round(sum(attempts) / len(attempts), 1) if attempts else 0,
         "avg_days_to_solve": round(sum(spans) / len(spans), 1) if spans else 0,
@@ -261,6 +290,22 @@ def stats() -> dict[str, Any]:
         "solved_per_week": round(len(recent) / 4, 1),
         "revision_due": len(revision_queue()),
     }
+
+
+def missing_complexity() -> list[dict[str, Any]]:
+    """Solved problems with no complexity recorded — an annotation gap, not a
+    practice gap, so it is kept out of the revision queue."""
+    return [
+        {
+            "id": p["id"],
+            "title": p["title"],
+            "difficulty": p["difficulty"],
+            "time_complexity": p["time_complexity"],
+            "space_complexity": p["space_complexity"],
+        }
+        for p in list_problems()
+        if p["status"] in SOLVED_STATUSES and not _has_complexity(p)
+    ]
 
 
 def revision_queue() -> list[dict[str, Any]]:
@@ -281,6 +326,11 @@ def revision_queue() -> list[dict[str, Any]]:
             elif problem.get("used_hint") and not problem["revisits"]:
                 reason = "solved with a hint, never redone"
             else:
+                # A missing complexity analysis is deliberately NOT a reason to
+                # be here. This queue means "re-solve this"; an unannotated
+                # solve needs a one-line note, not another attempt. It is
+                # counted in stats()["missing_complexity"] and listed by
+                # missing_complexity() instead.
                 continue
         else:
             continue
@@ -294,6 +344,9 @@ def revision_queue() -> list[dict[str, Any]]:
                 "url": problem["url"],
                 "difficulty": problem["difficulty"],
                 "topics": problem["topics"],
+                "phase": problem["phase"],
+                "time_complexity": problem["time_complexity"],
+                "space_complexity": problem["space_complexity"],
                 "confidence": problem.get("confidence"),
                 "days_since_touched": (current - touched).days if touched else None,
                 "reason": reason,

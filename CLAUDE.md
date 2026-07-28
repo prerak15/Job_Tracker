@@ -15,10 +15,12 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   resumes.py     resume versions + JD tailoring
   dsa.py         DSA practice
   design.py      system design study (LLD/HLD)
-  ai.py          chat agent, ~29 in-process tools
+  prep.py        curriculum phases, standing weaknesses, cross-domain readiness
+  ai.py          chat agent, ~38 in-process tools
   main.py        REST routes
+  selftest.py    every domain, against a temp dir — no server needed
 frontend/    Vite + React dashboard (4 tabs + chat drawer)
-data/        the database — four JSON files, GITIGNORED
+data/        the database — five JSON files, GITIGNORED
 ```
 
 **Never commit anything under `data/`.** The repo is meant to be shareable; the
@@ -121,12 +123,67 @@ stamps `date_started` / `date_completed` automatically. `issues[]` (`{date, issu
 is the most valuable field — always capture what actually went wrong.
 `confidence` is 1–5 and feeds the revision queue.
 
+`time_complexity` / `space_complexity` hold LaTeX math **without** delimiters
+(`O(n \log n)`, `O(h)`) so the same string renders in the dashboard and pastes
+into a write-up. `phase` links the problem to a curriculum phase in
+`prep.json`, which is what drives per-phase progress.
+
+A solved problem with no complexity recorded is counted in
+`stats()["missing_complexity"]` and listed by `missing_complexity()`, but is
+**deliberately kept out of `revision_queue()`**. That queue means "re-solve
+this"; an unannotated solve needs a one-line note instead, and conflating the
+two makes the queue noisy enough to be ignored.
+
 ### `data/design.json` — `{"topics": [...]}`
 
 `kind` is `hld` or `lld`. `status` is `todo` `studying` `practiced` `revisit`
 `stuck` — "practiced" means producible unaided, not just read. `concepts[]` is
 the cross-cutting tag used for weak-area stats; `components[]` is HLD
 vocabulary, `patterns[]` is LLD. `tradeoffs` is what interviewers probe.
+
+### `data/prep.json` — `{"phases": [...], "profile": {...}, "standing_issues": [...]}`
+
+The state that sits *above* individual problems. Note the shape: unlike the
+other four files this one is not a single list, so `jsonstore.read` is called
+with `"phases"` as the list key and the other two blocks ride alongside.
+
+`profile` holds `target_levels[]`, `target_companies[]`, `current_phase`,
+`current_milestone`. `phases[]` are `{key, name, status, order, topics[],
+milestone}` where `status` is `completed` `current` `upcoming` — setting one
+phase `current` demotes the previous one, so `current_phase` is never
+ambiguous. Per-phase solve counts are joined in from `dsa.json` at read time by
+matching `problem.phase` to `phase.key`; they are never stored.
+
+`standing_issues[]` are `{issue, category, active, date_added, seen_on[],
+date_resolved}`. The distinction that matters: a **per-problem** `issues[]`
+entry is what went wrong *that time*; a **standing** issue is a habit that
+recurs across unrelated problems. `seen_on[]` (`{date, problem_id}`) is what
+makes the recurrence count real — flag it every time, or the list degrades into
+a static checklist. `category` is `logic` `syntax` `complexity` `style`
+`process`.
+
+### Cross-domain: `prep.readiness()`
+
+The one view that joins all four domains — scheduled rounds from `jobs.json`
+are the deadline, and the DSA queue, design queue and standing weaknesses are
+what you have to turn up with. Prep coverage is matched by **company tag**
+(case-insensitive against `organisation`), so `untagged_companies` lists live
+applications with no practice tagged against them. Tagging practice with a
+company is what makes it show up here.
+
+## Testing
+
+`backend/selftest.py` runs every domain against a temp directory — no server,
+no test framework, and it never touches `data/`:
+
+```bash
+.venv/Scripts/python.exe backend/selftest.py
+```
+
+It repoints `jsonstore.DATA_DIR` *before* importing the domain modules; keep
+that ordering if you add to it. The final block guards the AI system prompt,
+which contains LaTeX braces that an f-string would eat — that bug once killed
+every chat turn before it reached the model.
 
 ## Conventions
 
@@ -137,4 +194,8 @@ vocabulary, `patterns[]` is LLD. `tradeoffs` is what interviewers probe.
   palette without validating it for colour-vision separation.
 - Adding a field: update the domain module's `_DEFAULTS` + `_normalize`, the
   Pydantic model in `main.py`, and the AI tool schema in `ai.py` if the assistant
-  should be able to set it.
+  should be able to set it. Then add a check to `backend/selftest.py`.
+- The assistant has an **interview mode** in `ai.py`'s system prompt: when asked
+  for a problem it gives the LeetCode number and title and nothing else — no
+  description, signature, template, edge cases or hints. That restraint is the
+  feature; don't soften it into "helpfully" including a starting point.
