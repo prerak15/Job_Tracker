@@ -12,6 +12,7 @@ temp directory *before* the domain modules are imported, so your own
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 from pathlib import Path
@@ -313,5 +314,29 @@ for candidate in set(
     assert candidate in names, f"prompt references a missing tool: {candidate}"
 assert ai.build_options(None).system_prompt == prompt
 print(f"prompt OK   {len(names)} tools, {len(prompt)} chars")
+
+# The Windows loop bridge: uvicorn --reload hands us a SelectorEventLoop, which
+# cannot spawn the CLI subprocess. Losing this bridge breaks every chat turn
+# while leaving the rest of the app working, so it is easy to miss.
+assert hasattr(ai, "_needs_proactor_bridge"), "Windows event-loop bridge is gone"
+assert not ai._needs_proactor_bridge(), "no running loop should mean no bridge"
+
+
+async def _is_bridged() -> bool:
+    return ai._needs_proactor_bridge()
+
+
+if sys.platform == "win32":
+    selector_loop = asyncio.SelectorEventLoop()
+    try:
+        assert selector_loop.run_until_complete(_is_bridged()), "selector loop must bridge"
+    finally:
+        selector_loop.close()
+    proactor_loop = asyncio.ProactorEventLoop()
+    try:
+        assert not proactor_loop.run_until_complete(_is_bridged()), "proactor needs no bridge"
+    finally:
+        proactor_loop.close()
+    print("loop bridge OK  selector->bridged, proactor->direct")
 
 print("\nALL CHECKS PASSED")

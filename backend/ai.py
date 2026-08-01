@@ -10,7 +10,10 @@ server), so there is no subprocess or network hop for a tool call.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+import threading
 from collections.abc import AsyncIterator
 from datetime import date
 from pathlib import Path
@@ -1016,7 +1019,7 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def stream_chat(message: str, session_id: str | None = None) -> AsyncIterator[str]:
+async def _stream(message: str, session_id: str | None = None) -> AsyncIterator[str]:
     """Yield Server-Sent Events for one chat turn."""
     try:
         async for event in query(prompt=message, options=build_options(session_id)):
@@ -1054,6 +1057,86 @@ async def stream_chat(message: str, session_id: str | None = None) -> AsyncItera
     except Exception as exc:  # surfaced in the chat panel rather than a 500
         yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
         yield _sse({"type": "done", "session_id": session_id})
+
+
+# --------------------------------------------------------------------------
+# Windows event-loop bridge
+# --------------------------------------------------------------------------
+#
+# The SDK talks to the Claude Code CLI by spawning it as a subprocess, and on
+# Windows asyncio can only do that on a ProactorEventLoop. uvicorn picks the
+# loop with:
+#
+#     if sys.platform == "win32" and not use_subprocess: ProactorEventLoop
+#     else:                                              SelectorEventLoop
+#
+# and `use_subprocess` is True whenever it runs with --reload or --workers. So
+# the reload-enabled dev command in the README lands on the selector loop and
+# every chat turn dies with a bare NotImplementedError, which the SDK reports
+# as "Failed to start Claude Code: " with nothing after the colon.
+#
+# Rather than banning --reload, run the SDK on its own Proactor loop in a
+# worker thread and forward the SSE frames back to the serving loop.
+
+_DONE = object()
+
+
+def _needs_proactor_bridge() -> bool:
+    if sys.platform != "win32":
+        return False
+    proactor = getattr(asyncio, "ProactorEventLoop", None)
+    if proactor is None:
+        return False
+    try:
+        return not isinstance(asyncio.get_running_loop(), proactor)
+    except RuntimeError:  # no running loop; nothing to bridge
+        return False
+
+
+def _pump(message: str, session_id: str | None, queue: Any, target: Any) -> None:
+    """Run one chat turn on a private Proactor loop, in this thread."""
+
+    def emit(frame: Any) -> None:
+        # The queue belongs to the serving loop, so hand items over to it.
+        target.call_soon_threadsafe(queue.put_nowait, frame)
+
+    async def drain() -> None:
+        async for frame in _stream(message, session_id):
+            emit(frame)
+
+    loop = asyncio.ProactorEventLoop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(drain())
+    except Exception as exc:  # never strand the reader
+        emit(_sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"}))
+        emit(_sse({"type": "done", "session_id": session_id}))
+    finally:
+        emit(_DONE)
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+async def stream_chat(message: str, session_id: str | None = None) -> AsyncIterator[str]:
+    """Yield Server-Sent Events for one chat turn, bridging loops if needed."""
+    if not _needs_proactor_bridge():
+        async for frame in _stream(message, session_id):
+            yield frame
+        return
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    thread = threading.Thread(
+        target=_pump,
+        args=(message, session_id, queue, asyncio.get_running_loop()),
+        name="claude-sdk-proactor",
+        daemon=True,
+    )
+    thread.start()
+    while True:
+        frame = await queue.get()
+        if frame is _DONE:
+            return
+        yield frame
 
 
 def health() -> dict[str, Any]:

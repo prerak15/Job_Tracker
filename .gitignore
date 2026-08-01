@@ -15,10 +15,12 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Your tracker data is PRIVATE and never committed — this repo is shareable,
-# your application history is not. The app recreates these files on first run.
-data/*.json
-data/*.tmp
+# Your tracker data is PRIVATE and never committed — this repo is public, your
+# application history is not. The app recreates these files on first run.
+# Ignore EVERYTHING here rather than listing extensions: an earlier version
+# only covered *.json and *.tmp, so any note, export or scratch file dropped in
+# data/ would have been committed silently.
+data/*
 !data/.gitkeep
 
 # Local Claude Code state (launch.json is intentionally committed)

@@ -41,6 +41,21 @@ cd frontend && npm run dev
 
 Then open http://localhost:5173.
 
+### Windows: --reload and the event loop
+
+uvicorn chooses its loop with `asyncio_loop_factory(use_subprocess)` — Proactor
+on Windows *unless* `use_subprocess` is set, which `--reload` and `--workers`
+both set. The Agent SDK spawns the CLI as a subprocess, and Windows asyncio can
+only do that on a **ProactorEventLoop**; on a selector loop it raises a bare
+`NotImplementedError`, which surfaces as `CLIConnectionError: Failed to start
+Claude Code: ` with nothing after the colon.
+
+`ai.stream_chat` detects a non-Proactor loop and runs the turn on its own
+Proactor loop in a worker thread, forwarding SSE frames back through an
+`asyncio.Queue`. Keep that bridge if you touch `stream_chat` — without it,
+`--reload` silently breaks every chat turn while the rest of the app works
+fine.
+
 ## Auth — no API key
 
 The chat runs on the **Claude Code CLI bundled with `claude-agent-sdk`**, which
