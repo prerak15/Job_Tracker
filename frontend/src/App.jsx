@@ -6,6 +6,7 @@ import Applications from './components/Applications'
 import ChatPanel from './components/ChatPanel'
 import Companies from './components/Companies'
 import Dsa from './components/Practice'
+import Patterns from './components/Patterns'
 import Resumes from './components/Resumes'
 import SystemDesign from './components/SystemDesign'
 
@@ -14,6 +15,7 @@ const TABS = [
   { id: 'companies', label: 'Companies' },
   { id: 'dsa', label: 'DSA' },
   { id: 'design', label: 'System Design' },
+  { id: 'patterns', label: 'Patterns' },
   { id: 'resumes', label: 'Resumes' },
 ]
 
@@ -32,6 +34,10 @@ const EMPTY = {
   topics: [],
   designStats: {},
   designQueue: [],
+  patterns: [],
+  patternStats: {},
+  patternQueue: [],
+  patternUnstarted: [],
   prep: { phases: [], standing_issues: [], profile: {} },
   readiness: {},
   companies: [],
@@ -96,6 +102,10 @@ export default function App() {
         topics,
         designStats,
         designQueue,
+        patternList,
+        patternStats,
+        patternQueue,
+        patternUnstarted,
         prep,
         readiness,
         companies,
@@ -115,6 +125,10 @@ export default function App() {
         api.design.list(),
         api.design.stats(),
         api.design.revisionQueue(),
+        api.patterns.list(),
+        api.patterns.stats(),
+        api.patterns.revisionQueue(),
+        api.patterns.unstarted(),
         api.prep.get(),
         api.prep.readiness(),
         api.companies.list(),
@@ -135,6 +149,10 @@ export default function App() {
         topics,
         designStats,
         designQueue,
+        patterns: patternList,
+        patternStats,
+        patternQueue,
+        patternUnstarted,
         prep,
         readiness,
         companies,
@@ -170,6 +188,7 @@ export default function App() {
     companies: data.companyStats.targets ?? 0,
     dsa: data.dsaStats.solved ?? 0,
     design: data.designStats.practiced ?? 0,
+    patterns: data.patternStats.by_state?.practiced ?? 0,
     resumes: data.resumeStats.total_versions ?? 0,
   }
 
@@ -274,6 +293,16 @@ export default function App() {
                   queue={data.designQueue}
                   meta={data.meta}
                   reload={reload}
+                />
+              )}
+              {activeTab === 'patterns' && (
+                <Patterns
+                  patterns={data.patterns}
+                  stats={data.patternStats}
+                  queue={data.patternQueue}
+                  unstarted={data.patternUnstarted}
+                  reload={reload}
+                  askAssistant={askAssistant}
                 />
               )}
               {activeTab === 'resumes' && (

@@ -129,6 +129,23 @@ export const api = {
     promote: (role, status = 'saved') => post('/discover/promote', { role, status }),
   },
 
+  patterns: {
+    list: (domain) => get(`/patterns${domain ? `?domain=${domain}` : ''}`),
+    get: (key) => get(`/patterns/${key}`),
+    update: (key, body) => patch(`/patterns/${key}`, body),
+    remove: (key) => del(`/patterns/${key}`),
+    stats: () => get('/patterns/stats'),
+    // Two lists, deliberately separate: decayed vs. never started.
+    revisionQueue: () => get('/patterns/revision-queue'),
+    unstarted: () => get('/patterns/unstarted'),
+    seed: () => post('/patterns/seed'),
+    logRevisit: (key, body) => post(`/patterns/${key}/revisit`, body),
+    addProblem: (key, body) => post(`/patterns/${key}/problems`, body),
+    removeProblem: (key, index) => del(`/patterns/${key}/problems/${index}`),
+    // Queues a catalogue row as real work in dsa.json or design.json.
+    promote: (key, body) => post(`/patterns/${key}/promote`, body),
+  },
+
   design: {
     list: () => get('/design'),
     create: (body) => post('/design', body),

@@ -18,14 +18,16 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   resumes.py     resume versions + JD tailoring
   dsa.py         DSA practice
   design.py      system design study (LLD/HLD)
+  patterns.py    pattern revision across DSA + design
+  pattern_seed.py the sheet's 16 DSA patterns + an LLD/HLD set (data, not logic)
   prep.py        curriculum phases, standing weaknesses, cross-domain readiness
-  ai.py          chat agent, ~50 in-process tools
+  ai.py          chat agent, ~60 in-process tools
   main.py        REST routes
   selftest.py    every domain, against a temp dir — no server needed
-frontend/    Vite + React dashboard (5 tabs + chat drawer)
+frontend/    Vite + React dashboard (6 tabs + chat drawer)
   src/cache.js   session cache — survives a browser refresh
   src/refresh.js the auto-refresh loop
-data/        the database — six JSON files, GITIGNORED
+data/        the database — seven JSON files, GITIGNORED
 ```
 
 **Never commit anything under `data/`.** The repo is meant to be shareable; the
@@ -334,6 +336,71 @@ makes the recurrence count real — flag it every time, or the list degrades int
 a static checklist. `category` is `logic` `syntax` `complexity` `style`
 `process`.
 
+### `data/patterns.json` — `{"patterns": [...]}`
+
+The third axis. `dsa.json` tracks a problem, `prep.json` tracks the phase above
+it, and this tracks the **technique** — which cuts across both other domains
+and across every phase, so "what do I still not have" is a question neither of
+the other two can answer.
+
+Seeded from `pattern_seed.py` (`POST /api/patterns/seed`, idempotent): the
+sixteen patterns from the DSA sheet, in the sheet's order and with its
+sub-groupings, plus ten LLD/HLD techniques that have no equivalent sheet.
+
+| Field | Notes |
+|---|---|
+| `key` | the identity, not `id` — routes take the key, the way `prep.py` phases do |
+| `domain` | `dsa` `lld` `hld`; decides which file the join reads and which file `promote` writes to |
+| `idea` | the invariant that makes the technique correct — **not** a template and not a recognition cue |
+| `problems[]` | the catalogue: `{title, url, difficulty, group, challenge, refs[]}` |
+| `confidence` | 1–5, self-rated — the one progress signal the joins cannot supply |
+| `flagged` | forces it into the revision queue before the cadence would |
+
+**Everything about progress is joined in at read time and never stored.**
+`solved`, `coverage`, `state`, `last_worked` and `due` are recomputed from
+`dsa.json` and `design.json` on every read — the same choice `companies.py`
+makes against `jobs.json`, for the same reason. A stored copy of "have I done
+this" eventually disagrees with the tab that owns it, and the stale one is the
+one being read. `selftest.py` asserts none of it reaches the file.
+
+The join key is the **URL slug, namespaced by host** (`leetcode:two-sum`), with
+a normalised title as the fallback for a record entered by hand with no URL.
+Namespacing matters: LeetCode and GfG both publish `/problems/<slug>`. Title
+matching strips his `LC 207 - ` prefix, which is why the sheet's "Contruct tree
+from preorder and inorder" and `LC 105 - Construct Binary Tree from Preorder
+and Inorder Traversal` are correctly the same problem — by slug, not by title.
+
+Two lists, and like `dsa.py`'s pair they **must stay disjoint**:
+
+- `revision_queue()` — patterns with real work behind them that has since
+  decayed. Re-derive these.
+- `unstarted()` — patterns with nothing solved at all.
+
+You cannot revise what you never learned, so **nothing untouched is ever due, a
+hand-set flag included**. That is what makes the two lists disjoint by
+construction rather than by convention, and the frontend disables the flag
+button on an untouched pattern rather than letting it look set and do nothing.
+
+There is deliberately **no second coach**. `dsa.coach()` answers "which problem
+now" and stays the only thing that does; this module answers "which technique
+has gone stale", a different question at a different altitude. Two competing
+"do this next" cards would eventually disagree, and both would stop being read.
+
+Work tagged with a pattern but not listed under it (a DSA problem topic'd
+`sliding-window`, a design topic tagged with the pattern key) counts as
+**activity** — it feeds `last_worked` and stops the pattern reading as
+untouched — but deliberately not toward `coverage`. The catalogue is the
+curriculum; a denominator that grows every time something is tagged is a
+percentage that means nothing.
+
+`promote` turns a catalogue row into real work: a `todo` in `dsa.json`, or a
+`todo` topic in `design.json` tagged with the pattern so it joins straight
+back. It sets **no phase** — stamping the current phase onto a tree problem
+promoted mid-Phase-2 would let it jump `next_up()` as "next in Graph
+Foundations", which it isn't. Pattern study is a parallel track to the
+curriculum, so promoted work lands in the backlog until a phase is set
+deliberately.
+
 ### Cross-domain: `prep.readiness()`
 
 The one view that joins all four domains — scheduled rounds from `jobs.json`
@@ -400,6 +467,10 @@ is only for having nothing to show at all.
 - Adding a field: update the domain module's `_DEFAULTS` + `_normalize`, the
   Pydantic model in `main.py`, and the AI tool schema in `ai.py` if the assistant
   should be able to set it. Then add a check to `backend/selftest.py`.
+- A pattern's `idea` is revision material, not a hint. It belongs in a revision
+  session or a post-mortem — never alongside a problem just handed over. The
+  system prompt says so, and interview mode overrides that section rather than
+  the other way round.
 - The assistant has an **interview mode** in `ai.py`'s system prompt: when asked
   for a problem it gives the LeetCode number and title and nothing else — no
   description, signature, template, edge cases or hints. That restraint is the

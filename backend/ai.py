@@ -36,6 +36,8 @@ import company_seed
 import design
 import discover
 import dsa
+import pattern_seed
+import patterns
 import prep
 import resumes
 import storage
@@ -889,6 +891,149 @@ async def design_stats_tool(_: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# pattern revision
+# --------------------------------------------------------------------------
+
+
+def _brief_pattern(pattern: dict[str, Any]) -> dict[str, Any]:
+    """Compact projection — the catalogue is 200+ rows, and returning it on a
+    list call would spend the context window on problems nobody asked about."""
+    return {
+        "key": pattern["key"],
+        "name": pattern["name"],
+        "domain": pattern["domain"],
+        "state": pattern["state"],
+        "solved": pattern["solved"],
+        "total": pattern["total"],
+        "coverage": pattern["coverage"],
+        "confidence": pattern["confidence"],
+        "due": pattern["due"],
+        "due_reason": pattern["due_reason"],
+        "days_since_worked": pattern["days_since_worked"],
+    }
+
+
+@tool(
+    "list_patterns",
+    "The pattern board across DSA and system design: coverage, state "
+    "(untouched/learning/practiced), confidence and whether each is due. "
+    "Progress is joined live from the DSA and design records, so it can never "
+    "disagree with them. Use get_pattern for one pattern's problem list.",
+    schema({"domain": {**STR, "enum": patterns.DOMAINS}}),
+)
+async def list_patterns_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok([_brief_pattern(p) for p in patterns.list_patterns(args.get("domain"))])
+
+
+@tool(
+    "get_pattern",
+    "One pattern in full: the idea behind it, and every problem in its "
+    "catalogue with whether that problem is tracked and solved.",
+    schema({"key": STR}, ["key"]),
+)
+async def get_pattern_tool(args: dict[str, Any]) -> dict[str, Any]:
+    pattern = patterns.get_pattern(args["key"])
+    return _ok(pattern) if pattern else _err("No pattern with that key.")
+
+
+@tool(
+    "get_pattern_revision_queue",
+    "Patterns that have decayed — flagged, low confidence, or nothing worked "
+    "in them for weeks. Each carries the next unsolved problem in it. This is "
+    "revision of a technique, not of one problem: get_dsa_coach still owns "
+    "\"which problem now\".",
+    schema({}),
+)
+async def pattern_revision_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(patterns.revision_queue())
+
+
+@tool(
+    "get_unstarted_patterns",
+    "Patterns with nothing solved in them yet — new ground, deliberately kept "
+    "out of the revision queue so a long backlog can't bury a due revision.",
+    schema({}),
+)
+async def unstarted_patterns_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(patterns.unstarted())
+
+
+@tool(
+    "update_pattern",
+    "Rate or annotate a pattern: confidence 1-5, notes, or flagged to force it "
+    "into the revision queue before the cadence would catch it.",
+    schema(
+        {
+            "key": STR,
+            "confidence": INT,
+            "notes": STR,
+            "flagged": BOOL,
+            "idea": {**STR, "description": "The invariant that makes it correct"},
+        },
+        ["key"],
+    ),
+)
+async def update_pattern_tool(args: dict[str, Any]) -> dict[str, Any]:
+    key = args.pop("key")
+    pattern = patterns.update_pattern(key, args)
+    return _ok(_brief_pattern(pattern)) if pattern else _err("No pattern with that key.")
+
+
+@tool(
+    "log_pattern_revisit",
+    "Record that a pattern was re-derived, with how it went and a fresh "
+    "confidence. This is what clears a flag and resets its revision clock.",
+    schema({"key": STR, "outcome": STR, "confidence": INT, "date": STR}, ["key", "outcome"]),
+)
+async def log_pattern_revisit_tool(args: dict[str, Any]) -> dict[str, Any]:
+    pattern = patterns.log_revisit(
+        args["key"], args["outcome"], args.get("confidence"), args.get("date")
+    )
+    return _ok(_brief_pattern(pattern)) if pattern else _err("No pattern with that key.")
+
+
+@tool(
+    "promote_pattern_problem",
+    "Queue a problem from a pattern's catalogue as real tracked work — a todo "
+    "in DSA, or a todo topic in system design, tagged with the pattern. Pass "
+    "the index from get_pattern. The sheet has no LeetCode numbers, so pass "
+    "title in his \"LC 207 - Course Schedule\" form when you know the number.",
+    schema(
+        {"key": STR, "index": INT, "title": STR, "phase": PHASE},
+        ["key", "index"],
+    ),
+)
+async def promote_pattern_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        out = patterns.promote(
+            args["key"], args["index"], args.get("title"), args.get("phase")
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok({"domain": out["domain"], "id": out["record"]["id"], "title": out["record"]["title"]})
+
+
+@tool(
+    "seed_patterns",
+    "Load the curated pattern curriculum — his own DSA sheet plus a starting "
+    "set of LLD/HLD techniques. Idempotent: only adds what is missing.",
+    schema({}),
+)
+async def seed_patterns_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(patterns.seed(pattern_seed.PATTERNS))
+
+
+@tool(
+    "get_pattern_stats",
+    "Pattern coverage across both domains: how many are practiced, which are "
+    "thinnest, how many are due, and how much of the catalogue is untracked.",
+    schema({}),
+)
+async def pattern_stats_tool(_: dict[str, Any]) -> dict[str, Any]:
+    return _ok(patterns.stats())
+
+
+# --------------------------------------------------------------------------
 # company board + role discovery
 # --------------------------------------------------------------------------
 
@@ -1176,6 +1321,15 @@ TOOLS = [
     log_design_issue_tool,
     log_design_revisit_tool,
     design_stats_tool,
+    list_patterns_tool,
+    get_pattern_tool,
+    pattern_revision_tool,
+    unstarted_patterns_tool,
+    update_pattern_tool,
+    log_pattern_revisit_tool,
+    promote_pattern_tool,
+    seed_patterns_tool,
+    pattern_stats_tool,
     list_companies_tool,
     get_company_tool,
     add_company_tool,
@@ -1198,9 +1352,10 @@ ALLOWED_TOOLS = [f"mcp__{SERVER_NAME}__{t.name}" for t in TOOLS] + ["WebSearch",
 # dynamic part, so it is prepended instead.
 _SYSTEM_PROMPT = """You are the assistant for Prerak's personal job-search tracker.
 
-You maintain five things: job applications, the company board, resume versions,
-DSA practice, and system design study. You have tools for all of them — use
-them rather than just replying, because the dashboard reads what you write.
+You maintain six things: job applications, the company board, resume versions,
+DSA practice, system design study, and pattern revision across the last two.
+You have tools for all of them — use them rather than just replying, because
+the dashboard reads what you write.
 
 How to handle common messages:
 
@@ -1324,6 +1479,28 @@ Managing the board itself:
   company's jobs, so "none" plus a careers_url is the honest default.
 - If the board is empty, offer seed_company_board once.
 
+Pattern revision — he now studies pattern-wise, so there is a third axis above
+individual problems: the technique, tracked across both DSA and system design.
+
+- "Which patterns are weak / what should I revise?" -> get_pattern_revision_queue.
+  Those are techniques that have decayed — flagged, low confidence, or nothing
+  worked in them for weeks. get_unstarted_patterns is the separate list of
+  ground never covered; keep the two apart, because the second is always longer
+  and will bury the first if you merge them.
+- Every coverage number there is joined live from the DSA and design records,
+  so never "update" progress on a pattern. Solving the problem is what moves
+  it. What you can write is confidence, notes, flagged, and a revisit.
+- After a revision session on a technique -> log_pattern_revisit with how it
+  actually went and a fresh confidence. That is what clears the flag and resets
+  the clock; without it the pattern stays in the queue forever.
+- "Give me something on <pattern>" -> get_pattern for its catalogue, pick an
+  unsolved row, and promote_pattern_problem to queue it before handing it over.
+- Each pattern carries an `idea`: the invariant that makes the technique
+  correct. That is revision material, and it belongs in a revision session or a
+  post-mortem — never alongside a problem you have just handed him. Attaching
+  it to a fresh problem is a hint, and a well-written one is most of the
+  solution. Interview mode overrides this section, not the other way round.
+
 Interview mode — when Prerak asks for a problem, submits a solution, or asks to
 be interviewed, act as a FAANG coding interviewer calibrated to SWE2 (L3/E3)
 and SWE3 (L4/E4) at Google, Meta and Apple. Read get_prep_profile first so you
@@ -1340,7 +1517,9 @@ know the current phase, milestone, and standing weaknesses.
     add_dsa_problem when the queue has nothing left or he names a problem that
     is not tracked yet.
   - He is learning concepts, not memorising patterns. Never justify a pick with
-    "this is the same pattern as X" — say which idea it exercises. If a problem
+    "this is the same pattern as X" — say which idea it exercises. Studying
+    pattern-wise does not change this: the pattern board is how work is
+    organised and revised, not a licence to hand him a template. If a problem
     is clearly beyond where he is, defer_dsa_problem it behind the specific
     prerequisites rather than letting him grind at it.
 

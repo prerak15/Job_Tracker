@@ -453,6 +453,161 @@ raw = json.loads((tmp / "dsa.json").read_text(encoding="utf-8"))
 assert all("elapsed_seconds" not in p for p in raw["problems"]), "derived field was persisted"
 print("stopwatch OK", {k: dsa.stats()[k] for k in ("avg_time_minutes", "timed")})
 
+# ------------------------------------------------------------- patterns
+import pattern_seed  # noqa: E402
+import patterns  # noqa: E402
+
+# The join key is namespaced by host: LeetCode and GfG both publish
+# /problems/<slug>, and unnamespaced they would claim each other's problems.
+assert patterns.slug_of("https://leetcode.com/problems/two-sum/description/") == "leetcode:two-sum"
+assert patterns.slug_of("https://www.geeksforgeeks.org/problems/two-sum/1") == "geeksforgeeks:two-sum"
+assert patterns.slug_of("https://leetcode.com/problems/two-sum/") != patterns.slug_of(
+    "https://www.geeksforgeeks.org/problems/two-sum/1"
+), "two sites must not share a slug"
+assert patterns.slug_of("https://example.com/blog/two-sum") is None
+# His titles carry the LeetCode number; the sheet's do not.
+assert patterns.norm_title("LC 207 - Course Schedule") == patterns.norm_title("Course Schedule")
+assert patterns.norm_title("leetcode 200: Number of Islands") == "numberofislands"
+
+patterns.seed(
+    [
+        {
+            "key": "sliding_window",
+            "name": "Sliding Window",
+            "domain": "dsa",
+            "order": 1,
+            "idea": "Both ends only move forward.",
+            "problems": [
+                {
+                    "title": "Longest Substring Without Repeating Characters",
+                    "url": "https://leetcode.com/problems/longest-substring-without-repeating-characters/",
+                    "difficulty": "medium",
+                },
+                {"title": "Two Sum", "url": None},
+                {"title": "Minimum Window Substring", "url": None, "difficulty": "hard"},
+            ],
+        },
+        {
+            "key": "hld_caching",
+            "name": "Caching",
+            "domain": "hld",
+            "order": 2,
+            "idea": "Every cache design is an invalidation design.",
+            "problems": [{"title": "Design a news feed", "url": None}],
+        },
+    ]
+)
+again = patterns.seed(pattern_seed.PATTERNS)
+assert again["skipped"] == 2 and again["added"] == len(pattern_seed.PATTERNS) - 2, again
+assert patterns.seed(pattern_seed.PATTERNS)["added"] == 0, "seeding must be idempotent"
+
+window = patterns.get_pattern("sliding_window")
+# "Two Sum" has no URL in this catalogue, so it can only match by title -- and
+# there is a solved Two Sum from the dsa section above.
+by_title = next(q for q in window["problems"] if q["title"] == "Two Sum")
+assert by_title["tracked"] and by_title["solved"], by_title
+assert window["solved"] == 1 and window["total"] == 3, window
+assert window["state"] == "learning" and window["coverage"] == 33.3, window
+
+# A fresh solve joins by slug across two differently-worded titles.
+lss = dsa.create_problem(
+    {
+        "title": "LC 3 - Longest Substring Without Repeating Characters",
+        "url": "https://leetcode.com/problems/longest-substring-without-repeating-characters/description/",
+        "status": "solved",
+        "topics": ["sliding-window"],
+        "confidence": 5,
+    }
+)
+window = patterns.get_pattern("sliding_window")
+assert window["solved"] == 2 and window["coverage"] == 66.7, window
+assert window["state"] == "practiced", window["state"]
+assert patterns.for_problem(lss["url"]) == [
+    {"key": "sliding_window", "name": "Sliding Window", "domain": "dsa"}
+], patterns.for_problem(lss["url"])
+
+# Covered, never rated and never revisited -- that is the one due reason a
+# freshly finished pattern can have, and re-deriving it is what clears it.
+assert window["due"] and window["due_reason"] == "covered but never rated or revisited", window
+patterns.log_revisit("sliding_window", "re-derived the shrink condition", confidence=4)
+window = patterns.get_pattern("sliding_window")
+assert not window["due"] and window["confidence"] == 4 and window["last_revised"], window
+
+# A flag forces it back; a revisit is what takes it out again.
+patterns.update_pattern("sliding_window", {"flagged": True})
+assert patterns.get_pattern("sliding_window")["due_reason"] == "flagged for revision"
+patterns.log_revisit("sliding_window", "clean second pass", confidence=5)
+after = patterns.get_pattern("sliding_window")
+assert not after["flagged"] and not after["due"], after
+
+# Nothing untouched is ever due, a hand-set flag included -- that is what keeps
+# the two queues disjoint by construction rather than by convention.
+patterns.update_pattern("kadane", {"flagged": True})
+assert patterns.get_pattern("kadane")["due"] is False, "an untouched pattern must not be due"
+due_keys = {q["key"] for q in patterns.revision_queue()}
+new_keys = {q["key"] for q in patterns.unstarted()}
+assert not (due_keys & new_keys), due_keys & new_keys
+
+# Solved work tagged with a pattern but not listed under it counts as activity,
+# and deliberately NOT toward coverage -- a denominator that grows on tagging
+# is a percentage that means nothing.
+dsa.create_problem(
+    {"title": "Fruit Into Baskets", "status": "solved", "topics": ["sliding-window"]}
+)
+after = patterns.get_pattern("sliding_window")
+assert after["extra_solved"] == 1 and after["total"] == 3, after
+assert after["coverage"] == 66.7, "off-catalogue work must not move coverage"
+
+# Promotion queues a catalogue row as real work, tagged so it joins back.
+promoted = patterns.promote("sliding_window", 2)
+assert promoted["domain"] == "dsa"
+assert promoted["record"]["status"] == "todo" and promoted["record"]["topics"] == ["sliding-window"]
+assert promoted["record"]["difficulty"] == "hard", "the sheet's difficulty carries through"
+assert promoted["record"]["phase"] is None, "pattern study must not claim a curriculum phase"
+assert patterns.get_pattern("sliding_window")["problems"][2]["tracked"]
+try:
+    patterns.promote("sliding_window", 2)
+    raise AssertionError("promoting an already-tracked problem must fail")
+except ValueError:
+    pass
+
+design_side = patterns.promote("hld_caching", 0)
+assert design_side["domain"] == "hld" and design_side["record"]["kind"] == "hld"
+cache = patterns.get_pattern("hld_caching")
+assert cache["tracked"] == 1 and cache["solved"] == 0, cache
+design.update_topic(design_side["record"]["id"], {"status": "practiced"})
+cache = patterns.get_pattern("hld_caching")
+assert cache["solved"] == 1 and cache["state"] == "practiced", cache
+
+try:
+    patterns.add_problem("sliding_window", {"title": "two sum"})
+    raise AssertionError("a duplicate catalogue title must be rejected")
+except ValueError:
+    pass
+
+# Every progress number is joined at read time; none of it may be persisted.
+raw = json.loads((tmp / "patterns.json").read_text(encoding="utf-8"))
+derived = {"solved", "total", "coverage", "state", "due", "tracked", "extra_solved"}
+assert all(not derived & set(p) for p in raw["patterns"]), "a derived field was persisted"
+assert all("id" not in q for p in raw["patterns"] for q in p["problems"]), "catalogue rows are not records"
+
+# The shipped curriculum itself: keys unique, order dense, every idea written.
+keys = [p["key"] for p in pattern_seed.PATTERNS]
+assert len(set(keys)) == len(keys), "duplicate pattern key in the seed"
+assert [p["order"] for p in pattern_seed.PATTERNS] == list(range(1, len(keys) + 1))
+for entry in pattern_seed.PATTERNS:
+    assert entry["domain"] in patterns.DOMAINS, entry["key"]
+    assert entry["idea"].strip(), f"{entry['key']} has no idea written"
+    assert entry["problems"], f"{entry['key']} has no problems"
+
+ps = patterns.stats()
+assert ps["total"] == len(pattern_seed.PATTERNS), ps
+assert ps["due"] + ps["unstarted"] <= ps["total"], ps
+print(
+    f"patterns OK {ps['total']} patterns, {ps['problems']} problems, "
+    f"{ps['due']} due, {ps['unstarted']} unstarted"
+)
+
 # ------------------------------------------------------- companies + discovery
 import companies  # noqa: E402
 import company_seed  # noqa: E402

@@ -1,9 +1,9 @@
 """FastAPI app for the personal job tracker.
 
 Local-only: no auth, CORS open for localhost. Domains — applications, the
-company board, DSA practice, system design, resumes and the prep profile —
-plus an AI chat endpoint (ai.py) that writes through the same storage modules
-as these REST endpoints.
+company board, DSA practice, system design, pattern revision, resumes and the
+prep profile — plus an AI chat endpoint (ai.py) that writes through the same
+storage modules as these REST endpoints.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ import discover
 import docx_export
 import dsa
 import latex_export
+import pattern_seed
+import patterns
 import pdf_export
 import prep
 import resumes
@@ -731,6 +733,116 @@ def remove_standing_issue(issue_id: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# pattern revision
+# --------------------------------------------------------------------------
+
+
+class PatternPatch(BaseModel):
+    name: str | None = None
+    idea: str | None = None
+    confidence: int | None = Field(default=None, ge=1, le=5)
+    notes: str | None = None
+    flagged: bool | None = None
+    order: int | None = None
+
+
+class CatalogueProblemIn(BaseModel):
+    title: str
+    url: str | None = None
+    difficulty: Literal["easy", "medium", "hard"] | None = None
+    group: str | None = None
+    challenge: bool = False
+    refs: list[str] = Field(default_factory=list)
+
+
+class PromoteProblemIn(BaseModel):
+    index: int
+    # The sheet has no LeetCode numbers, so a caller who knows one can pass the
+    # title in his own "LC 207 - Course Schedule" form rather than have one
+    # invented here.
+    title: str | None = None
+    phase: str | None = None
+
+
+@app.get("/api/patterns")
+def get_patterns(domain: str | None = None) -> list[dict[str, Any]]:
+    return patterns.list_patterns(domain=domain)
+
+
+@app.get("/api/patterns/stats")
+def get_pattern_stats() -> dict[str, Any]:
+    return patterns.stats()
+
+
+@app.get("/api/patterns/revision-queue")
+def get_pattern_revision_queue() -> list[dict[str, Any]]:
+    """Patterns that have decayed. Disjoint from /api/patterns/unstarted."""
+    return patterns.revision_queue()
+
+
+@app.get("/api/patterns/unstarted")
+def get_unstarted_patterns() -> list[dict[str, Any]]:
+    return patterns.unstarted()
+
+
+@app.post("/api/patterns/seed")
+def post_pattern_seed() -> dict[str, Any]:
+    """Load the curated curriculum. Idempotent — only adds what's missing."""
+    return patterns.seed(pattern_seed.PATTERNS)
+
+
+@app.get("/api/patterns/{key}")
+def get_one_pattern(key: str) -> dict[str, Any]:
+    return _found(patterns.get_pattern(key), "Pattern")
+
+
+@app.patch("/api/patterns/{key}")
+def patch_pattern(key: str, payload: PatternPatch) -> dict[str, Any]:
+    return _found(
+        patterns.update_pattern(key, payload.model_dump(exclude_unset=True)), "Pattern"
+    )
+
+
+@app.delete("/api/patterns/{key}", status_code=204)
+def remove_pattern(key: str) -> None:
+    if not patterns.delete_pattern(key):
+        raise HTTPException(404, "Pattern not found")
+
+
+@app.post("/api/patterns/{key}/revisit")
+def post_pattern_revisit(key: str, payload: RevisitIn) -> dict[str, Any]:
+    return _found(
+        patterns.log_revisit(key, payload.outcome, payload.confidence, payload.date),
+        "Pattern",
+    )
+
+
+@app.post("/api/patterns/{key}/problems", status_code=201)
+def post_pattern_problem(key: str, payload: CatalogueProblemIn) -> dict[str, Any]:
+    try:
+        return _found(patterns.add_problem(key, payload.model_dump()), "Pattern")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/patterns/{key}/problems/{index}")
+def remove_pattern_problem(key: str, index: int) -> dict[str, Any]:
+    try:
+        return _found(patterns.remove_problem(key, index), "Pattern")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/patterns/{key}/promote", status_code=201)
+def post_pattern_promote(key: str, payload: PromoteProblemIn) -> dict[str, Any]:
+    """Queue a catalogue problem in the domain that owns it — dsa or design."""
+    try:
+        return patterns.promote(key, payload.index, payload.title, payload.phase)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# --------------------------------------------------------------------------
 # company board
 # --------------------------------------------------------------------------
 
@@ -923,6 +1035,7 @@ def get_meta() -> dict[str, Any]:
         "artifact_types": design.ARTIFACT_TYPES,
         "phase_statuses": prep.PHASE_STATUSES,
         "standing_issue_categories": prep.ISSUE_CATEGORIES,
+        "pattern_domains": patterns.DOMAINS,
         "company_statuses": companies.STATUSES,
         "company_tiers": companies.TIERS,
         "company_focus_areas": companies.FOCUS_AREAS,
@@ -940,6 +1053,7 @@ def get_overview() -> dict[str, Any]:
         "design": design.stats(),
         "resumes": resumes.stats(),
         "prep": prep.stats(),
+        "patterns": patterns.stats(),
         "companies": companies.stats(),
         "followups_due": len(storage.followup_suggestions()),
     }
