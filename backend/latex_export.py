@@ -67,14 +67,20 @@ def _clean(fragment: str) -> str:
     for macro in ("textbf", "textit", "underline", "emph", "small", "large", "Huge", "scshape"):
         text = re.sub(r"\\" + macro + r"\s*\{([^{}]*)\}", r"\1", text)
     text = re.sub(r"\\(vspace|hspace)\s*\{[^}]*\}", "", text)
+    # Purely decorative boxes go entirely, contents included — \raisebox holds a
+    # glyph (a link arrow, say), not words, and its length argument is not text.
+    text = re.sub(r"\\raisebox\s*\{[^}]*\}\s*\{[^{}]*\}", "", text)
+    text = re.sub(r"\\[,;:!]", "", text)  # thin/medium/negative spaces
     text = re.sub(r"\\[a-zA-Z@]+\s*\*?", "", text)  # any remaining command
     text = text.replace("$|$", "|").replace("\\\\", " ")
+    text = re.sub(r"\$\s*\$", "", text)  # math left empty by the strip above
     text = re.sub(r"[{}]", "", text)
     for escaped, plain in (
         (r"\&", "&"), (r"\%", "%"), (r"\$", "$"), (r"\#", "#"), (r"\_", "_"),
     ):
         text = text.replace(escaped, plain)
-    text = text.replace("--", "–")
+    # Longest first: "---" is an em dash, and "--" would otherwise eat its head.
+    text = text.replace("---", "—").replace("--", "–")
     return re.sub(r"\s+", " ", text).strip(" |·-")
 
 

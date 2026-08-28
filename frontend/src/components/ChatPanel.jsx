@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { CACHE_KEYS, readCache, writeCache } from '../cache'
 
 const EXAMPLES = [
   'Paste a job posting to log it',
@@ -10,10 +11,15 @@ const EXAMPLES = [
 ]
 
 export default function ChatPanel({ onClose, onDataChanged, prompt }) {
-  const [messages, setMessages] = useState([])
+  // Restored together: the transcript is what you read, and the session id is
+  // what makes the next message continue that conversation rather than start a
+  // new one. The Agent SDK persists sessions itself, so a resumed id survives a
+  // backend restart; if it ever doesn't, the turn fails into the panel as a
+  // message and "New chat" is right there.
+  const [messages, setMessages] = useState(() => readCache(CACHE_KEYS.chatMessages, []))
+  const [sessionId, setSessionId] = useState(() => readCache(CACHE_KEYS.chatSession, null))
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [sessionId, setSessionId] = useState(null)
   const [health, setHealth] = useState(null)
   const bodyRef = useRef(null)
   const busyRef = useRef(false)
@@ -26,6 +32,16 @@ export default function ChatPanel({ onClose, onDataChanged, prompt }) {
   useEffect(() => {
     bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages])
+
+  // Cached at turn boundaries, never per token: `messages` changes on every
+  // streamed character, and mirroring that into storage would be hundreds of
+  // synchronous writes a second. The guard means a refresh mid-answer restores
+  // the last *completed* turn rather than half a sentence.
+  useEffect(() => {
+    if (busy) return
+    writeCache(CACHE_KEYS.chatMessages, messages)
+    writeCache(CACHE_KEYS.chatSession, sessionId)
+  }, [busy, messages, sessionId])
 
   // A dashboard button (e.g. "Generate resume") hands us a ready-made prompt.
   // Each click carries a new token so the same text can be sent twice.
@@ -156,6 +172,9 @@ export default function ChatPanel({ onClose, onDataChanged, prompt }) {
               className="btn ghost small"
               style={{ marginLeft: 'auto' }}
               onClick={() => {
+                // Clearing the state is enough — the effect above is the only
+                // writer for these keys, and it persists the cleared
+                // transcript on the very next render.
                 setSessionId(null)
                 setMessages([])
               }}

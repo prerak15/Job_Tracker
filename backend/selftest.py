@@ -13,6 +13,7 @@ temp directory *before* the domain modules are imported, so your own
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -292,6 +293,340 @@ coverage = next(c for c in ready["company_coverage"] if c["organisation"] == "Ac
 assert coverage["dsa_tagged"] == 1 and coverage["dsa_solved"] == 1, coverage
 assert "Acme Corp" not in ready["untagged_companies"]
 print("readiness OK", {k: ready[k] for k in ("next_round_in_days", "dsa_missing_complexity")})
+
+# ------------------------------------------------------------------ next up
+# phase_1 ("Trees") is current at this point. Two fresh todos: one inside the
+# current phase, one with no phase at all.
+in_phase = dsa.create_problem(
+    {"title": "Validate BST", "difficulty": "medium", "status": "todo", "phase": "phase_1"}
+)
+backlog = dsa.create_problem({"title": "Two Pointers Warmup", "difficulty": "easy"})
+
+nxt = dsa.next_up()
+assert [n["title"] for n in nxt] == [
+    "Median of Two Sorted Arrays",  # stuck -- unblock before starting anything
+    "Validate BST",  # todo, current phase
+    "Two Pointers Warmup",  # todo, no phase, so it sorts below despite being easy
+], [n["title"] for n in nxt]
+assert "stuck" in nxt[0]["reason"], nxt[0]["reason"]
+assert nxt[1]["in_current_phase"] and "Trees" in nxt[1]["reason"], nxt[1]
+assert nxt[2]["in_current_phase"] is False, nxt[2]
+
+# The two queues must stay disjoint: next_up() is "attempt this", the revision
+# queue is "re-solve this". A solved problem can never appear here.
+assert all(n["status"] in dsa.NEXT_UP_RANK for n in nxt), nxt
+assert not {n["id"] for n in nxt} & {r["id"] for r in dsa.revision_queue()}
+
+# Open work outranks the plan -- finish what is started before starting more.
+dsa.update_problem(backlog["id"], {"status": "in_progress"})
+assert dsa.next_up()[0]["title"] == "Two Pointers Warmup", dsa.next_up()
+assert dsa.next_up()[0]["days_open"] == 0, dsa.next_up()[0]
+assert len(dsa.next_up(limit=1)) == 1
+dsa.delete_problem(in_phase["id"])
+dsa.delete_problem(backlog["id"])
+print("next up OK ", [n["title"] for n in nxt])
+
+# ------------------------------------------------------------------ coach
+# Nothing open, no entrenched habit yet, nothing due for revision: the coach
+# falls through to the curriculum and behaves like next_up().
+c = dsa.coach()
+assert c["kind"] == "advance" and c["pick"]["title"].startswith("Median"), c
+
+# Deferring pulls it off every queue but leaves a checkable way back in.
+median_id = next(p["id"] for p in dsa.list_problems() if p["title"].startswith("Median"))
+gate = dsa.create_problem({"title": "In-degree warmup", "difficulty": "easy", "phase": "phase_1"})
+held = dsa.defer_problem(median_id, "too far ahead of the fundamentals", [gate["id"]])
+assert held["status"] == "deferred" and held["defer"]["until_solved"] == [gate["id"]], held
+assert not any(n["title"].startswith("Median") for n in dsa.next_up()), dsa.next_up()
+
+c = dsa.coach()
+assert [h["title"] for h in c["on_hold"]] == ["Median of Two Sorted Arrays"], c["on_hold"]
+assert c["on_hold"][0]["blockers"] == ["In-degree warmup"], c["on_hold"]
+assert c["kind"] == "advance" and c["pick"]["title"] == "In-degree warmup", c
+
+# Solving the prerequisite reopens it on its own -- nobody has to remember.
+dsa.update_problem(gate["id"], {"status": "solved", "confidence": 5})
+c = dsa.coach()
+assert c["kind"] == "unlocked" and c["pick"]["title"].startswith("Median"), c
+assert c["on_hold"] == [] and len(c["unlocked"]) == 1, c
+
+# Leaving deferred must clear the gate, or a live problem still reads as held.
+assert dsa.update_problem(median_id, {"status": "todo"})["defer"] is None
+
+# Open work outranks the plan.
+dsa.update_problem(gate["id"], {"status": "in_progress"})
+assert dsa.coach()["kind"] == "finish", dsa.coach()
+dsa.update_problem(gate["id"], {"status": "solved"})
+
+# A habit seen three times outranks the curriculum -- and the drill is a
+# *different* problem on the same concept, because reproducing an answer you
+# have already seen tests recall, not whether the idea transferred.
+prep.flag_standing_issue(habit["id"], problem_id=two_sum["id"])
+assert len(prep.list_standing_issues()[0]["seen_on"]) == 3
+same_concept = dsa.create_problem(
+    {"title": "Contains Duplicate", "difficulty": "easy", "topics": ["hashmap"]}
+)
+c = dsa.coach()
+assert c["kind"] == "drill" and c["pick"]["action"] == "solve", c
+assert c["pick"]["title"] == "Contains Duplicate", c["pick"]
+assert any("recurred 3x" in b for b in c["because"]), c["because"]
+
+# With nothing unsolved on that concept, the drill falls back to a redo.
+dsa.delete_problem(same_concept["id"])
+c = dsa.coach()
+assert c["kind"] == "drill" and c["pick"]["action"] == "redo", c
+assert c["pick"]["title"] == "Two Sum", c["pick"]
+
+# Habit beaten, but three solves since the last revisit: revision cadence wins.
+prep.resolve_standing_issue(habit["id"])
+dsa.update_problem(two_sum["id"], {"confidence": 2})
+c = dsa.coach()
+assert c["kind"] == "revise" and c["pick"]["action"] == "redo", c
+assert c["solved_since_last_revisit"] >= dsa.REVISE_EVERY, c
+print("coach OK   ", {k: c[k] for k in ("kind", "revision_due")})
+
+# ------------------------------------------------------------------ stopwatch
+import datetime as _dt  # noqa: E402
+
+timed = dsa.create_problem({"title": "Timed problem", "difficulty": "easy"})
+assert timed["elapsed_seconds"] == 0 and timed["timer"]["started_at"] is None, timed
+
+# Start is the clock *and* the status change -- two clicks is how a timer ends
+# up never being used.
+running = dsa.set_timer(timed["id"], "start")
+assert running["status"] == "in_progress" and running["date_started"], running
+assert running["timer"]["started_at"], running["timer"]
+assert dsa.stats()["timer_running"]["id"] == timed["id"], dsa.stats()["timer_running"]
+
+# Backdate the running segment rather than sleeping -- the selftest stays fast.
+def _rewind(problem_id, seconds):
+    data = dsa.load()
+    for record in data[dsa.KEY]:
+        if record["id"] == problem_id and record["timer"]["started_at"]:
+            record["timer"]["started_at"] = (
+                _dt.datetime.now() - _dt.timedelta(seconds=seconds)
+            ).isoformat(timespec="seconds")
+    dsa.write(dsa.FILE, data)
+
+_rewind(timed["id"], 300)
+assert 299 <= dsa.get_problem(timed["id"])["elapsed_seconds"] <= 302, dsa.get_problem(timed["id"])
+
+paused = dsa.set_timer(timed["id"], "pause")
+assert paused["timer"]["started_at"] is None, paused["timer"]
+assert 299 <= paused["timer"]["accumulated_seconds"] <= 302, paused["timer"]
+assert dsa.stats()["timer_running"] is None
+
+# Paused time is not counted, and resuming adds to the total rather than
+# restarting it -- that is the whole point of having a pause.
+dsa.set_timer(timed["id"], "start")
+_rewind(timed["id"], 120)
+banked = dsa.update_problem(timed["id"], {"status": "solved"})
+assert banked["timer"]["started_at"] is None, banked["timer"]
+assert 419 <= banked["timer"]["accumulated_seconds"] <= 423, banked["timer"]
+assert banked["time_spent_minutes"] == 7, banked["time_spent_minutes"]
+
+# A hand-entered figure is an explicit act and must survive the roll-up.
+manual = dsa.create_problem({"title": "Solved offline", "time_spent_minutes": 45})
+dsa.set_timer(manual["id"], "start")
+_rewind(manual["id"], 90)
+manual = dsa.update_problem(manual["id"], {"status": "solved"})
+assert manual["time_spent_minutes"] == 45, manual["time_spent_minutes"]
+
+# A timer left running overnight would wreck avg_time_minutes on its own, so a
+# single segment is banked at the cap and flagged rather than silently trusted.
+forgotten = dsa.create_problem({"title": "Left running"})
+dsa.set_timer(forgotten["id"], "start")
+_rewind(forgotten["id"], (dsa.STALE_SEGMENT_HOURS + 9) * 3600)
+forgotten = dsa.set_timer(forgotten["id"], "pause")
+assert forgotten["timer"]["capped"] is True, forgotten["timer"]
+assert forgotten["timer"]["accumulated_seconds"] == dsa.STALE_SEGMENT_HOURS * 3600, forgotten
+
+assert dsa.set_timer(forgotten["id"], "reset")["elapsed_seconds"] == 0
+try:
+    dsa.set_timer(forgotten["id"], "rewind")
+    raise AssertionError("an unknown timer action must not be accepted")
+except ValueError:
+    pass
+
+# elapsed_seconds is derived, so it must never reach the file.
+raw = json.loads((tmp / "dsa.json").read_text(encoding="utf-8"))
+assert all("elapsed_seconds" not in p for p in raw["problems"]), "derived field was persisted"
+print("stopwatch OK", {k: dsa.stats()[k] for k in ("avg_time_minutes", "timed")})
+
+# ------------------------------------------------------- companies + discovery
+import companies  # noqa: E402
+import company_seed  # noqa: E402
+import discover  # noqa: E402
+
+acme = companies.create_company(
+    {
+        "name": "Acme Corp",
+        "category": "startup",
+        "tier": "growth",
+        "locations": ["Bengaluru"],
+        "status": "target",
+        "interest": 5,
+    }
+)
+assert acme["applications"] == 1, acme  # the job created at the top of this file
+assert acme["board_column"] == "applied", "a live application must beat the manual status"
+
+# Name matching: postings carry legal entities, so a long name matches by
+# prefix — but a short one must not, or "Ola" would claim every Olam job.
+assert companies.matches(acme, "Acme Corp Private Limited")
+assert companies.matches(acme, "acme corp")
+short = companies.create_company({"name": "Zap", "aliases": ["Zap Technologies"]})
+assert not companies.matches(short, "Zapier Inc"), "short names must match exactly"
+assert companies.matches(short, "Zap Technologies Private Limited"), "aliases match by prefix"
+assert companies.find_company("zap technologies")["name"] == "Zap"
+
+try:
+    companies.create_company({"name": "ACME CORP"})
+    raise AssertionError("duplicate company should have been rejected")
+except ValueError:
+    pass
+
+added = companies.seed(company_seed.SEED)
+assert added["added"] == len(company_seed.SEED), added
+again = companies.seed(company_seed.SEED)
+assert again["added"] == 0 and again["skipped"] == len(company_seed.SEED), again
+
+board = companies.list_companies()
+assert len(board) == len(company_seed.SEED) + 2, len(board)
+# Sorted by interest descending, so the one thing wanted at 5/5 leads.
+assert board[0]["name"] == "Acme Corp", board[0]["name"]
+assert all(c["ats_token"] for c in companies.fetchable()), "a wired company needs a token"
+
+# A provider without a token can't be fetched and must not claim it can.
+lying = companies.create_company({"name": "No Token Ltd", "ats_provider": "greenhouse"})
+assert lying["ats_provider"] == "none", lying
+
+cstats = companies.stats()
+assert cstats["total"] == len(board) + 1, cstats["total"]
+assert cstats["with_ats"] == len(companies.fetchable())
+assert cstats["applied_to"] >= 1
+gaps = [g["name"] for g in companies.target_gaps()]
+assert "Acme Corp" not in gaps, "a target with an application is not a gap"
+companies.update_company(short["id"], {"status": "target", "interest": 4})
+assert "Zap" in [g["name"] for g in companies.target_gaps()]
+print(f"companies OK {cstats['total']} on board, {cstats['with_ats']} wired")
+
+# --- discovery: pure parsing, no network -----------------------------------
+# Shapes mirror the live responses; each provider names things differently and
+# only Lever dates in epoch milliseconds.
+GREENHOUSE = {
+    "jobs": [
+        {
+            "title": "Software Engineer II",
+            "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "location": {"name": "Bengaluru, India"},
+            "first_published": "2026-07-20T04:52:12-04:00",
+            "updated_at": "2026-07-30T00:00:00-04:00",
+            "content": "&lt;p&gt;Build &amp;amp; scale services&lt;/p&gt;",
+        },
+        {
+            "title": "Staff Engineer",
+            "absolute_url": "https://boards.greenhouse.io/acme/jobs/2",
+            "location": {"name": "San Francisco"},
+            "first_published": "2026-07-21T00:00:00-04:00",
+        },
+    ]
+}
+LEVER = [
+    {
+        "text": "Backend Engineer",
+        "hostedUrl": "https://jobs.lever.co/acme/abc",
+        "categories": {"location": "Bengaluru", "department": "Engineering"},
+        "createdAt": 1784539800000,  # 2026-07-20T09:30Z, in epoch milliseconds
+        "descriptionPlain": "Go and Kafka.",
+    }
+]
+ASHBY = {
+    "jobs": [
+        {
+            "title": "ML Engineer",
+            "jobUrl": "https://jobs.ashbyhq.com/acme/xyz",
+            "location": "Bengaluru",
+            "secondaryLocations": [{"location": "Chennai"}],
+            "publishedAt": "2026-06-29T17:12:35.753+00:00",
+            "isListed": True,
+            "department": "Research",
+        },
+        {"title": "Hidden Role", "jobUrl": "https://x/y", "location": "Bengaluru", "isListed": False},
+    ]
+}
+
+gh = discover.parse("greenhouse", GREENHOUSE, acme)
+assert [r["title"] for r in gh] == ["Software Engineer II", "Staff Engineer"]
+assert gh[0]["posted"] == "2026-07-20", "first_published wins over updated_at"
+assert "Build & scale services" in gh[0]["description"], gh[0]["description"]
+lv = discover.parse("lever", LEVER, acme)
+assert lv[0]["posted"] == "2026-07-20", lv[0]["posted"]  # epoch ms -> ISO day
+ash = discover.parse("ashby", ASHBY, acme)
+assert [r["title"] for r in ash] == ["ML Engineer"], "isListed False must be dropped"
+assert ash[0]["locations"] == ["Bengaluru", "Chennai"]
+
+# Seniority is word-boundary matched. An earlier version looked for "i " and
+# read "Principal AI Security Specialist" as entry level.
+for title, want in [
+    ("Principal AI Security Specialist", "senior"),
+    ("Sr. Staff Software Development Engineer - AI Engineer", "senior"),
+    ("Engineering Manager, AI", "senior"),
+    ("Software Engineer II", "mid"),
+    ("Associate Software Engineer", "entry"),
+    ("Associate Director, Platform", "senior"),
+    ("Senior Data Science Intern", "intern"),
+    # The AI labs title every IC level this way; reading it as senior would
+    # hide their whole board from a SWE2 search.
+    ("Member of Technical Staff", "mid"),
+]:
+    assert discover.guess_seniority(title) == want, (title, discover.guess_seniority(title))
+
+# Keywords anchor at the start of a word, so "ai" must not match "Retail".
+assert not discover.matches_keywords({"title": "Retail Ops Manager", "department": ""}, ["ai"])
+assert discover.matches_keywords({"title": "Engineering Manager", "department": ""}, ["engineer"])
+
+everything = gh + lv + ash
+india = discover.filter_roles(everything, keywords=["engineer"], exclude_seniority=["senior"])
+# "Staff Engineer" is dropped twice over: senior, and San Francisco.
+assert [r["title"] for r in india] == [
+    "Software Engineer II",
+    "Backend Engineer",
+    "ML Engineer",
+], india
+assert discover.filter_roles(everything, keywords=["sales"]) == []
+# Sales titles are dropped by default even when they match an engineering word.
+noise = [{**gh[0], "title": "Sales Engineer", "url": "https://x/s"}]
+assert discover.filter_roles(noise, keywords=["engineer"]) == []
+
+undated = [{**gh[0], "posted": None}]
+assert discover.filter_roles(undated, max_age_days=1), "undated postings must not be hidden"
+assert not discover.filter_roles(gh[:1], max_age_days=1, as_of=jsonstore.date.today())
+
+remote = [{**gh[1], "locations": ["Remote"], "remote": True, "seniority": "mid"}]
+assert not discover.filter_roles(remote), "remote is opt-in"
+assert discover.filter_roles(remote, include_remote=True)
+
+# Dedupe: against what's tracked, by url and by (organisation, title).
+# The Lever fixture is "Backend Engineer" at Acme Corp, which is the very job
+# created at the top of this file — so a real tracked record must hide it.
+kept, already = discover.dedupe(everything, storage.list_jobs())
+assert already == 1, already
+assert "Backend Engineer" not in [r["title"] for r in kept], kept
+tracked = [{"url": gh[0]["url"], "organisation": "", "job_title": ""}]
+kept, already = discover.dedupe(everything, tracked)
+assert already == 1 and len(kept) == 3, (already, len(kept))
+by_title = [{"url": None, "organisation": "Acme Corp", "job_title": "backend engineer"}]
+_, already = discover.dedupe(everything, by_title)
+assert already == 1, "a hand-added record has no url, so title matching must catch it"
+twice = discover.dedupe(everything + everything, [])[0]
+assert len(twice) == 4, "the same role listed twice collapses"
+
+promoted = discover.to_job(lv[0])
+assert promoted["status"] == "saved", "discovery finds leads, not applications"
+assert promoted["source"] == "careers_page"
+assert promoted["organisation"] == "Acme Corp" and promoted["date_job_posted"] == "2026-07-20"
+print(f"discovery OK {len(everything)} parsed, {len(india)} after filters")
 
 # ------------------------------------------------------------------ prompt
 import ai  # noqa: E402

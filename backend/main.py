@@ -1,8 +1,9 @@
 """FastAPI app for the personal job tracker.
 
-Local-only: no auth, CORS open for localhost. Four domains — applications,
-DSA practice, system design, resumes — plus an AI chat endpoint (ai.py) that
-writes through the same storage modules as these REST endpoints.
+Local-only: no auth, CORS open for localhost. Domains — applications, the
+company board, DSA practice, system design, resumes and the prep profile —
+plus an AI chat endpoint (ai.py) that writes through the same storage modules
+as these REST endpoints.
 """
 
 from __future__ import annotations
@@ -14,7 +15,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+import companies
+import company_seed
 import design
+import discover
 import docx_export
 import dsa
 import latex_export
@@ -414,6 +418,18 @@ class RevisitIn(BaseModel):
     date: str | None = None
 
 
+class TimerIn(BaseModel):
+    action: str  # start | pause | reset
+
+
+class DeferIn(BaseModel):
+    reason: str
+    # Problem ids that must reach a solved status before this resurfaces. The
+    # gate is what separates a deferral from "I'll get back to it".
+    until_solved: list[str] = Field(default_factory=list)
+    review_on: str | None = None
+
+
 @app.get("/api/dsa")
 def get_problems() -> list[dict[str, Any]]:
     return dsa.list_problems()
@@ -439,6 +455,18 @@ def get_dsa_missing_complexity() -> list[dict[str, Any]]:
     return dsa.missing_complexity()
 
 
+# Declared before /api/dsa/{problem_id} on purpose — routes match in order, and
+# the wildcard would otherwise swallow these as problem_id="next-up"/"coach".
+@app.get("/api/dsa/next-up")
+def get_dsa_next_up(limit: int = dsa.NEXT_UP_LIMIT) -> list[dict[str, Any]]:
+    return dsa.next_up(limit)
+
+
+@app.get("/api/dsa/coach")
+def get_dsa_coach() -> dict[str, Any]:
+    return dsa.coach()
+
+
 @app.get("/api/dsa/{problem_id}")
 def get_one_problem(problem_id: str) -> dict[str, Any]:
     return _found(dsa.get_problem(problem_id), "Problem")
@@ -460,6 +488,23 @@ def remove_problem(problem_id: str) -> None:
 @app.post("/api/dsa/{problem_id}/issue")
 def post_dsa_issue(problem_id: str, payload: IssueIn) -> dict[str, Any]:
     return _found(dsa.log_issue(problem_id, payload.issue, payload.date), "Problem")
+
+
+@app.post("/api/dsa/{problem_id}/timer")
+def post_dsa_timer(problem_id: str, payload: TimerIn) -> dict[str, Any]:
+    try:
+        problem = dsa.set_timer(problem_id, payload.action)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _found(problem, "Problem")
+
+
+@app.post("/api/dsa/{problem_id}/defer")
+def post_dsa_defer(problem_id: str, payload: DeferIn) -> dict[str, Any]:
+    return _found(
+        dsa.defer_problem(problem_id, payload.reason, payload.until_solved, payload.review_on),
+        "Problem",
+    )
 
 
 @app.post("/api/dsa/{problem_id}/revisit")
@@ -686,6 +731,177 @@ def remove_standing_issue(issue_id: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# company board
+# --------------------------------------------------------------------------
+
+
+class CompanyIn(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    category: str = "product"
+    tier: str | None = None
+    hq: str | None = None
+    locations: list[str] = Field(default_factory=list)
+    website: str | None = None
+    careers_url: str | None = None
+    ats_provider: str = "none"
+    ats_token: str | None = None
+    focus: list[str] = Field(default_factory=list)
+    tech_stack: list[str] = Field(default_factory=list)
+    org_summary: str | None = None
+    interest: int | None = None
+    status: str = "researching"
+    notes: str = ""
+
+
+class CompanyPatch(BaseModel):
+    name: str | None = None
+    aliases: list[str] | None = None
+    category: str | None = None
+    tier: str | None = None
+    hq: str | None = None
+    locations: list[str] | None = None
+    website: str | None = None
+    careers_url: str | None = None
+    ats_provider: str | None = None
+    ats_token: str | None = None
+    focus: list[str] | None = None
+    tech_stack: list[str] | None = None
+    org_summary: str | None = None
+    interest: int | None = None
+    status: str | None = None
+    notes: str | None = None
+
+
+@app.get("/api/companies")
+def get_companies(
+    status: str | None = None,
+    category: str | None = None,
+    tier: str | None = None,
+    q: str | None = None,
+) -> list[dict[str, Any]]:
+    return companies.list_companies(status=status, category=category, tier=tier, query=q)
+
+
+@app.post("/api/companies", status_code=201)
+def post_company(payload: CompanyIn) -> dict[str, Any]:
+    try:
+        return companies.create_company(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# Static segments must be declared before /{company_id} or the path parameter
+# swallows them — the same ordering trap as /api/dsa/missing-complexity.
+@app.get("/api/companies/stats")
+def get_company_stats() -> dict[str, Any]:
+    return companies.stats()
+
+
+@app.get("/api/companies/target-gaps")
+def get_target_gaps() -> list[dict[str, Any]]:
+    """Companies marked as targets that you've never actually applied to."""
+    return companies.target_gaps()
+
+
+@app.post("/api/companies/seed")
+def post_seed() -> dict[str, Any]:
+    """Load the curated India board. Idempotent — re-running only adds what's new."""
+    return companies.seed(company_seed.SEED)
+
+
+@app.get("/api/companies/{company_id}")
+def get_one_company(company_id: str) -> dict[str, Any]:
+    return _found(companies.get_company(company_id), "Company")
+
+
+@app.patch("/api/companies/{company_id}")
+def patch_company(company_id: str, payload: CompanyPatch) -> dict[str, Any]:
+    return _found(
+        companies.update_company(company_id, payload.model_dump(exclude_unset=True)),
+        "Company",
+    )
+
+
+@app.delete("/api/companies/{company_id}", status_code=204)
+def remove_company(company_id: str) -> None:
+    if not companies.delete_company(company_id):
+        raise HTTPException(404, "Company not found")
+
+
+# --------------------------------------------------------------------------
+# role discovery
+# --------------------------------------------------------------------------
+
+
+class DiscoverIn(BaseModel):
+    company_ids: list[str] | None = None
+    keywords: list[str] = Field(default_factory=list)
+    # None means "use the built-in defaults"; an empty list means "no filter".
+    exclude_keywords: list[str] | None = None
+    locations: list[str] | None = None
+    include_remote: bool = False
+    max_age_days: int | None = None
+    exclude_seniority: list[str] = Field(default_factory=list)
+    limit: int = 100
+    include_description: bool = False
+    force: bool = False
+
+
+class PromoteIn(BaseModel):
+    role: dict[str, Any]
+    status: Status = "saved"
+
+
+@app.get("/api/discover/providers")
+def get_providers() -> dict[str, Any]:
+    """Which boards are supported and how much of the board is wired up."""
+    wired = companies.fetchable()
+    by_provider: dict[str, int] = {p: 0 for p in discover.PROVIDERS}
+    for company in wired:
+        by_provider[company["ats_provider"]] = by_provider.get(company["ats_provider"], 0) + 1
+    return {
+        "providers": discover.PROVIDERS,
+        "wired": len(wired),
+        "by_provider": by_provider,
+        "cache_ttl_seconds": discover.CACHE_TTL_SECONDS,
+        "default_locations": list(discover.INDIA_TOKENS),
+        "default_exclude_keywords": list(discover.NOISE_KEYWORDS),
+    }
+
+
+@app.post("/api/discover")
+async def post_discover(payload: DiscoverIn) -> dict[str, Any]:
+    """Check every wired job board and return roles that aren't tracked yet."""
+    return await discover.search(
+        company_ids=payload.company_ids,
+        keywords=payload.keywords,
+        exclude_keywords=(
+            discover.NOISE_KEYWORDS
+            if payload.exclude_keywords is None
+            else payload.exclude_keywords
+        ),
+        locations=(
+            discover.INDIA_TOKENS if payload.locations is None else payload.locations
+        ),
+        include_remote=payload.include_remote,
+        max_age_days=payload.max_age_days,
+        exclude_seniority=payload.exclude_seniority,
+        limit=payload.limit,
+        include_description=payload.include_description,
+        force=payload.force,
+    )
+
+
+@app.post("/api/discover/promote", status_code=201)
+def post_promote(payload: PromoteIn) -> dict[str, Any]:
+    """Turn a discovered role into a tracked application record."""
+    if not payload.role.get("title") or not payload.role.get("company"):
+        raise HTTPException(400, "A role needs at least a title and a company.")
+    return storage.create_job(discover.to_job(payload.role, payload.status))
+
+
+# --------------------------------------------------------------------------
 # meta + overview
 # --------------------------------------------------------------------------
 
@@ -707,6 +923,11 @@ def get_meta() -> dict[str, Any]:
         "artifact_types": design.ARTIFACT_TYPES,
         "phase_statuses": prep.PHASE_STATUSES,
         "standing_issue_categories": prep.ISSUE_CATEGORIES,
+        "company_statuses": companies.STATUSES,
+        "company_tiers": companies.TIERS,
+        "company_focus_areas": companies.FOCUS_AREAS,
+        "ats_providers": [*discover.PROVIDERS, "none"],
+        "seniority_levels": ["intern", "entry", "mid", "senior"],
     }
 
 
@@ -719,6 +940,7 @@ def get_overview() -> dict[str, Any]:
         "design": design.stats(),
         "resumes": resumes.stats(),
         "prep": prep.stats(),
+        "companies": companies.stats(),
         "followups_due": len(storage.followup_suggestions()),
     }
 

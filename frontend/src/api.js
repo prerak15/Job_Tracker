@@ -81,6 +81,10 @@ export const api = {
     remove: (id) => del(`/dsa/${id}`),
     stats: () => get('/dsa/stats'),
     revisionQueue: () => get('/dsa/revision-queue'),
+    nextUp: () => get('/dsa/next-up'),
+    coach: () => get('/dsa/coach'),
+    defer: (id, body) => post(`/dsa/${id}/defer`, body),
+    timer: (id, action) => post(`/dsa/${id}/timer`, { action }),
     missingComplexity: () => get('/dsa/missing-complexity'),
     logIssue: (id, body) => post(`/dsa/${id}/issue`, body),
     logRevisit: (id, body) => post(`/dsa/${id}/revisit`, body),
@@ -100,6 +104,29 @@ export const api = {
     flagStandingIssue: (id, body) => post(`/prep/standing-issues/${id}/flag`, body),
     resolveStandingIssue: (id) => post(`/prep/standing-issues/${id}/resolve`),
     removeStandingIssue: (id) => del(`/prep/standing-issues/${id}`),
+  },
+
+  companies: {
+    list: (params = {}) => {
+      const qs = new URLSearchParams(
+        Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== ''),
+      ).toString()
+      return get(`/companies${qs ? `?${qs}` : ''}`)
+    },
+    create: (body) => post('/companies', body),
+    update: (id, body) => patch(`/companies/${id}`, body),
+    remove: (id) => del(`/companies/${id}`),
+    stats: () => get('/companies/stats'),
+    targetGaps: () => get('/companies/target-gaps'),
+    seed: () => post('/companies/seed'),
+  },
+
+  discover: {
+    providers: () => get('/discover/providers'),
+    // Fans out over every wired job board, so this is slow by nature —
+    // callers should show a pending state rather than assume it returns fast.
+    search: (body) => post('/discover', body),
+    promote: (role, status = 'saved') => post('/discover/promote', { role, status }),
   },
 
   design: {

@@ -12,15 +12,20 @@ workaround. The web app's AI chat writes the same files through the same schema.
 backend/     FastAPI + the Claude Agent SDK chat agent
   jsonstore.py   atomic JSON read/write shared by every domain
   storage.py     job applications
+  companies.py   the company board — who to target
+  company_seed.py curated India list, ~170 companies (data, not logic)
+  discover.py    role discovery from public ATS boards
   resumes.py     resume versions + JD tailoring
   dsa.py         DSA practice
   design.py      system design study (LLD/HLD)
   prep.py        curriculum phases, standing weaknesses, cross-domain readiness
-  ai.py          chat agent, ~38 in-process tools
+  ai.py          chat agent, ~50 in-process tools
   main.py        REST routes
   selftest.py    every domain, against a temp dir — no server needed
-frontend/    Vite + React dashboard (4 tabs + chat drawer)
-data/        the database — five JSON files, GITIGNORED
+frontend/    Vite + React dashboard (5 tabs + chat drawer)
+  src/cache.js   session cache — survives a browser refresh
+  src/refresh.js the auto-refresh loop
+data/        the database — six JSON files, GITIGNORED
 ```
 
 **Never commit anything under `data/`.** The repo is meant to be shareable; the
@@ -93,6 +98,65 @@ consistent.
 `saved` records are excluded from all rate denominators — they aren't
 applications yet.
 
+### `data/companies.json` — `{"companies": [...]}`
+
+The shortlist you work *from*, MNC and startup, seeded from `company_seed.py`
+(`POST /api/companies/seed`, idempotent — re-running only adds what's new and
+never clobbers a status or note you've set).
+
+| Field | Notes |
+|---|---|
+| `category` | reuses `storage.COMPANY_TYPES`, so promoting a company into an application carries its type through |
+| `tier` | `faang` `tier1` `tier2` `growth` `early` — the interview bar you'd prepare for, not a prestige ranking |
+| `status` | `researching` `target` `on_hold` `not_interested` |
+| `aliases[]` | other names the same employer posts under ("Eternal" for Zomato, the legal entity on a posting) |
+| `ats_provider` / `ats_token` | `greenhouse` `lever` `ashby` `none` — the discovery wiring |
+| `focus[]` | role families; `interest` is 1–5 and drives the default sort |
+| `discovery` | `{last_checked, last_count, last_error}` — a record of the last fetch, not a derived number |
+
+Two things are **joined in at read time and never stored**: `applications` /
+`leads` / `board_column` come from `jobs.json`, so the board can't disagree with
+the application list. `status` has no `applied` value on purpose — that is
+derived, so the board can never claim you applied when you didn't.
+
+Name matching (`companies.matches`) is exact on the name or an alias, plus a
+prefix match when the name is ≥5 characters — postings carry legal entities
+("Razorpay Software Private Limited"), but a 3-letter name matching by prefix
+would have "Ola" claiming every Olam job.
+
+### Role discovery — `discover.py`
+
+**Do not add HTML scraping.** Greenhouse, Lever and Ashby each publish a
+documented public JSON endpoint that aggregators are meant to consume, and it is
+both stabler and more polite than parsing a careers page that changes on the
+next redesign. Companies with no supported board keep `ats_provider: "none"`,
+and the assistant falls back to `WebSearch` + `save_discovered_role` for those.
+
+Everything from `parse` down is a pure function over a decoded payload, so the
+normalise → filter → dedupe pipeline is tested against fixtures with no network
+call. Keep it that way — `selftest.py` must stay hermetic.
+
+Results are deliberately **not persisted**. `jobs.json` is already the ledger;
+a second store of "roles I saw once" would need its own expiry and would drift
+out of agreement with it. A discovered role becomes real when it is promoted
+into a job record, which defaults to `saved` — discovery finds leads, and leads
+are outside every rate denominator, so bulk-saving can't distort response rates.
+
+Two matching rules earn their comments in the source, because both were bugs:
+`guess_seniority` and `matches_keywords` anchor on **word boundaries**. An
+earlier version searched for the substring `"i "` to catch "Engineer I" and
+classified "Principal AI Security Specialist" as entry level; keyword `"ai"`
+matched "Ret**ai**l". `staff` carries a `(?<!technical )` guard because the AI
+labs title every IC level "Member of Technical Staff".
+
+**Verify an ATS token before committing it.** A wrong token does not error — it
+silently lists another company's jobs. Six plausible guesses turned out to be
+somebody else (`tcs` is a UK care provider, `slice` a US pizza company,
+`linkedin` a Greenhouse test board, and `navi`/`porter`/`purestorage` all
+belonged to unrelated US firms). Fetch the board and check `company_name`
+(Greenhouse) or a sample posting URL (Lever, Ashby). An honest `none` beats a
+guess.
+
 ### `data/resumes.json` — `{"resumes": [...]}`
 
 `content` holds the resume text; `latex_content` optionally holds LaTeX source,
@@ -149,6 +213,99 @@ A solved problem with no complexity recorded is counted in
 this"; an unannotated solve needs a one-line note instead, and conflating the
 two makes the queue noisy enough to be ignored.
 
+There are **two queues, and they must stay disjoint**. `revision_queue()` is
+"re-solve something you already solved"; `next_up()` is "attempt something you
+never finished" — `in_progress`, then `stuck`, then `todo`, current curriculum
+phase before everything else, difficulty ascending, file order last. Merged into
+one list they compete for the same slot and the redo always loses. `next_up()`
+reads `current_phase` from `prep.json` with a local import, the same direction
+`prep.get_prep()` reads `dsa.json`; neither module imports the other at load.
+
+Entries carry the number, title, topics and a reason and **nothing else** — no
+solution notes, no complexity, no approach. The assistant's interview mode gives
+a LeetCode number and stops, so the queue must not be the hint leak that undoes
+it. The assistant reads the same list via `get_dsa_next_up`, so its pick and the
+dashboard's can't disagree.
+
+### `coach()` — the one recommendation
+
+`next_up()` and `revision_queue()` answer "what is outstanding". `coach()` picks
+*between* them and answers "what now", in this order:
+
+`unlocked` → `finish` → `drill` → `revise` → `advance` → `idle`
+
+It is **weakness-first, not curriculum-first**. A standing issue that has
+recurred `DRILL_AFTER_RECURRENCES` (3) times is a concept that hasn't landed,
+and new material stacked on top only manufactures more instances of it. The
+drill deliberately prefers a *different unsolved problem sharing a topic* with
+where the habit last appeared, falling back to a redo only when none exists —
+the user learns concepts and refuses to memorise patterns, so reproducing a seen
+answer is the wrong rep. Keep that preference in mind anywhere the assistant
+justifies a pick; `prep.profile.notes` carries it for the chat agent.
+
+`revise` fires on a cadence measured in **solves, not days** (`REVISE_EVERY`) —
+days punish a slow week, solves track what actually creates revision debt.
+
+Every branch appends to `because[]`. A recommendation nobody can audit is one
+that gets ignored the first time it looks wrong, and this one overrides the
+curriculum order, so it has to show its working. Keep `because[]` to reasoning
+the caller can't derive from the other fields — `on_hold` and `unlocked` are
+returned separately, so restating them as prose only lengthens the list.
+
+The dashboard renders all of this as **one card**, not two: the pick, then the
+rest of `next_up()` under "Then" with the pick filtered out, then what's on
+hold. The pick is normally the head of the queue, so separate cards showed the
+same problem twice — and when they do differ (a redo, or a deferral returning)
+the queue is only useful as context for the pick anyway.
+
+### The stopwatch — `timer`
+
+```
+"timer": {"started_at": ISO8601 | None, "accumulated_seconds": int, "capped": bool}
+```
+
+`started_at` is the segment currently running (`None` when paused);
+`accumulated_seconds` is everything already banked. `POST /api/dsa/{id}/timer`
+takes `start` / `pause` / `reset`, and **start is also the status change** —
+splitting "begin the problem" and "begin timing it" into two clicks is how a
+timer ends up never being used.
+
+Four things that are load-bearing:
+
+- **Server-side, not sessionStorage.** A refresh, a second tab and the chat
+  agent must all read the same clock.
+- **`elapsed_seconds` is derived and never persisted.** It is attached by
+  `_public()` on the read paths, deliberately *not* by `_normalize()`, which
+  also runs on the write path. `selftest.py` asserts it never reaches the file.
+- **Timer stamps carry a time of day**, unlike every other date in `data/` — a
+  stopwatch can't work at day resolution. They're the one exception to the ISO
+  `YYYY-MM-DD` rule above.
+- **A segment over `STALE_SEGMENT_HOURS` (4) is banked at the cap**, with
+  `capped` set. One timer left running overnight would wreck
+  `avg_time_minutes`, which is the only reason the stopwatch exists; the flag
+  keeps the number auditable rather than quietly wrong.
+
+Marking a problem solved banks the running segment and fills
+`time_spent_minutes` — but only if the clock actually ran **and** the field is
+empty. A hand-entered figure for a problem solved away from the app is an
+explicit act and always wins.
+
+### Deferral — `status: "deferred"`
+
+For a problem that is genuinely too far ahead. A `stuck` problem stalls the
+phase and quietly becomes a wall; a deferred one is off every queue with a
+stated, checkable way back:
+
+```
+"defer": {"reason": ..., "until_solved": [problem_id], "review_on": date|None}
+```
+
+`until_solved` is the point — "I'll come back to it" is a note to nobody, while
+a prerequisite list makes the problem resurface on its own as `coach()["kind"]
+== "unlocked"`. `_normalize` **clears `defer` whenever the status is not
+`deferred`**, so a resurfaced problem can never still read as on hold. Because
+`deferred` is absent from `NEXT_UP_RANK`, it drops out of `next_up()` for free.
+
 ### `data/design.json` — `{"topics": [...]}`
 
 `kind` is `hld` or `lld`. `status` is `todo` `studying` `practiced` `revisit`
@@ -200,6 +357,39 @@ that ordering if you add to it. The final block guards the AI system prompt,
 which contains LaTeX braces that an f-string would eat — that bug once killed
 every chat turn before it reached the model.
 
+## Frontend: session cache and auto-refresh
+
+`src/cache.js` wraps **sessionStorage** — per browser tab, gone when the tab
+closes. Not localStorage: two tabs on the tracker are two working contexts, and
+resume text and contact details shouldn't outlive the window they were read in.
+It degrades to an in-memory Map when storage is unavailable; a cache must never
+be the reason the app breaks.
+
+Three things it holds. **UI state** (open tab, chat drawer, auto-refresh on/off)
+through the `useCached` hook. **The dashboard snapshot**, so a browser refresh
+redraws the page you were on instead of flashing "Loading…" — hydrated once into
+a ref at mount, spread over `EMPTY` so a snapshot from before a field existed
+can't hand a child `undefined`. **The chat transcript and session id**, written
+at turn boundaries only; `messages` changes on every streamed token, so a
+`useCached` there would be hundreds of storage writes a second.
+
+Two rules that are load-bearing:
+
+- **`CACHE_VERSION` is how you invalidate.** Bump it when a cached shape changes
+  in a way `{...EMPTY, ...snapshot}` can't absorb. Old entries are swept at load.
+- **The timestamp lives under its own key.** Folded into the snapshot it would
+  change on every poll and defeat the unchanged-value check, turning each tick
+  into a 200 KB synchronous write. As it is, an unchanged poll writes 13 bytes.
+
+`src/refresh.js` polls every 30s. It exists because the dashboard isn't the only
+writer — the chat agent and hand-edits to `data/` change the same files. The
+loop **skips hidden tabs** (one left open overnight would be ~2,880 pointless
+requests, and still stale the moment it's looked at) and catches up on
+`visibilitychange`; it holds the callback in a ref so a parent re-render can't
+reset the interval; and it drops overlapping ticks. A failed poll **keeps the
+last good screen** and marks the topbar "stale · offline" — the full error card
+is only for having nothing to show at all.
+
 ## Conventions
 
 - Derived numbers (rates, queues, weak topics) are computed in the backend, never
@@ -214,3 +404,17 @@ every chat turn before it reached the model.
   for a problem it gives the LeetCode number and title and nothing else — no
   description, signature, template, edge cases or hints. That restraint is the
   feature; don't soften it into "helpfully" including a starting point.
+- Interview mode runs in the **doc format**, modelled on a Google onsite: the
+  solution is typed into the chat — no IDE, no autocomplete, nothing executes —
+  and is worked through in full *before* it is submitted on LeetCode. This
+  applies to a Claude Code session in this folder exactly as it does to the web
+  chat; both read the same spec in `ai.py`.
+
+  Two consequences. **Pause the stopwatch the moment a solution arrives**, and
+  restart it only if he goes back to rewrite — `time_spent_minutes` means time
+  to produce a solution, and folding the review into it makes
+  `avg_time_minutes` measure how talkative the reviewer was. And **review the
+  mistakes an IDE would have caught** — typos, unbound names, missing imports —
+  because in a doc round those are the candidate's to catch. Dry-run against a
+  concrete input and hand back expected-vs-actual rather than a corrected
+  listing; the failing case is the thing that teaches.

@@ -1,6 +1,51 @@
 import { useMemo, useState } from 'react'
 import { api } from '../api'
+import { clock, liveSeconds, useTicker } from '../refresh'
 import { BarRows, Card, Empty, Field, Pill, Tile, label, pct, since } from './ui'
+
+/**
+ * The stopwatch, and the buttons that drive it.
+ *
+ * The clock ticks in here rather than in the page, so a running timer re-renders
+ * one span every second instead of the whole DSA tab. The server owns the
+ * truth, so a refresh, a second tab and the chat agent all read the same clock.
+ */
+function Stopwatch({ problem, reload, compact = false }) {
+  const running = Boolean(problem.timer?.started_at)
+  useTicker(running ? 1000 : 60_000)
+
+  const live = liveSeconds(
+    problem.timer,
+    problem.elapsed_seconds ?? problem.timer?.accumulated_seconds ?? 0,
+  )
+
+  const drive = async (action) => {
+    await api.dsa.timer(problem.id, action)
+    reload()
+  }
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <span
+        className="row-value"
+        title={problem.timer?.capped ? 'A segment was capped — timer left running' : undefined}
+        style={{ fontVariantNumeric: 'tabular-nums', color: running ? 'var(--text-primary)' : undefined }}
+      >
+        {running ? '● ' : ''}
+        {clock(live)}
+        {problem.timer?.capped && ' ⚠'}
+      </span>
+      <button className="btn small" onClick={() => drive(running ? 'pause' : 'start')}>
+        {running ? 'Pause' : live ? 'Resume' : 'Start'}
+      </button>
+      {!compact && live > 0 && (
+        <button className="btn small ghost" title="Discard the timing" onClick={() => drive('reset')}>
+          Reset
+        </button>
+      )}
+    </span>
+  )
+}
 
 /** Revision queue — shared by DSA and System Design. */
 export function RevisionQueue({ items, onRevisit }) {
@@ -49,9 +94,188 @@ export function RevisionQueue({ items, onRevisit }) {
 
 // ---------------------------------------------------------------- DSA
 
+/** One queue row: the runway behind the pick, and the override.
+ *
+ *  Shows the number, title and topics and nothing else, on purpose — the
+ *  assistant is under orders to hand over a LeetCode number and stop, and this
+ *  would otherwise be the hint leak that undoes it. */
+function QueueRow({ item, reload }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        paddingBottom: 9,
+        borderBottom: '1px solid var(--grid)',
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="row-main" style={{ fontSize: 13 }}>
+          {item.url ? (
+            <a href={item.url} target="_blank" rel="noreferrer">
+              {item.title}
+            </a>
+          ) : (
+            item.title
+          )}
+        </div>
+        <div className="row-sub">
+          {item.reason}
+          {item.days_open != null && ` · open ${since(item.days_open)}`}
+          {item.topics.length > 0 && ` · ${item.topics.join(', ')}`}
+        </div>
+      </div>
+      <Pill>{item.difficulty}</Pill>
+      {item.status === 'todo' ? (
+        <button
+          className="btn small"
+          title="Start this instead — begins the clock too"
+          onClick={async () => {
+            await api.dsa.timer(item.id, 'start')
+            reload()
+          }}
+        >
+          Start
+        </button>
+      ) : (
+        <Pill>{item.status}</Pill>
+      )}
+    </div>
+  )
+}
+
+/** The pick, the evidence for it, the runway behind it, and what is on hold.
+ *
+ *  One card rather than two. The pick is usually the head of the queue, so
+ *  rendering both separately showed the same problem twice; the cases where
+ *  they differ — a redo, or a deferral coming back — are exactly the cases
+ *  where the queue is only useful as context for the pick anyway.
+ *
+ *  The evidence is not decoration. This is allowed to override the curriculum
+ *  order, and a recommendation you can't audit is one you start ignoring the
+ *  first time it looks wrong. */
+function Coach({ coach, nextUp, reload, askAssistant }) {
+  const pick = coach?.pick
+  // The pick is drawn from the queue when it is new work, so drop it from the
+  // runway rather than listing it twice inside one card.
+  const runway = (nextUp ?? []).filter((item) => item.id !== pick?.id)
+  const askNext = askAssistant
+    ? () => askAssistant('Give me the next problem for my current milestone.')
+    : null
+
+  if (!pick) {
+    return (
+      <div className="rows">
+        <p className="muted small">{coach?.reason ?? 'Nothing queued.'}</p>
+        {askNext && (
+          <button className="btn small" style={{ alignSelf: 'flex-start' }} onClick={askNext}>
+            Ask for a problem
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const redo = pick.action === 'redo'
+  return (
+    <div className="rows">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="row-main">
+            {pick.url ? (
+              <a href={pick.url} target="_blank" rel="noreferrer">
+                {pick.title}
+              </a>
+            ) : (
+              pick.title
+            )}
+          </div>
+          <div className="row-sub">{coach.reason}</div>
+        </div>
+        <Pill>{pick.difficulty}</Pill>
+        <Pill>{coach.kind}</Pill>
+      </div>
+
+      {coach.because.length > 0 && (
+        <ul className="small muted" style={{ margin: '2px 0 0', paddingLeft: 18 }}>
+          {coach.because.map((line, n) => (
+            <li key={n}>{line}</li>
+          ))}
+        </ul>
+      )}
+
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        {redo ? (
+          <button
+            className="btn small primary"
+            onClick={async () => {
+              const outcome = prompt(`How did the redo of "${pick.title}" go?`)
+              if (outcome === null) return
+              const raw = prompt('Confidence now, 1-5?', '3')
+              if (raw === null) return
+              await api.dsa.logRevisit(pick.id, { outcome, confidence: Number(raw) || null })
+              reload()
+            }}
+          >
+            Log the redo
+          </button>
+        ) : (
+          <>
+            {/* Start is the stopwatch *and* the status change — splitting them
+                into two clicks is how a timer ends up never being used. */}
+            <Stopwatch problem={pick} reload={reload} />
+            <button
+              className="btn small primary"
+              onClick={async () => {
+                await api.dsa.update(pick.id, { status: 'solved' })
+                reload()
+              }}
+            >
+              Mark solved
+            </button>
+          </>
+        )}
+        {askNext && (
+          <button className="btn small ghost" onClick={askNext}>
+            Ask the assistant instead
+          </button>
+        )}
+      </div>
+
+      {runway.length > 0 && (
+        <div style={{ marginTop: 10, borderTop: '1px solid var(--grid)', paddingTop: 10 }}>
+          <div className="small muted" style={{ marginBottom: 6 }}>
+            Then
+          </div>
+          {runway.map((item) => (
+            <QueueRow key={item.id} item={item} reload={reload} />
+          ))}
+        </div>
+      )}
+
+      {coach.on_hold.length > 0 && (
+        <div style={{ marginTop: 10, borderTop: '1px solid var(--grid)', paddingTop: 10 }}>
+          <div className="small muted" style={{ marginBottom: 6 }}>
+            On hold — these come back on their own
+          </div>
+          {coach.on_hold.map((item) => (
+            <div key={item.id} style={{ marginBottom: 4 }}>
+              <div className="row-main" style={{ fontSize: 13 }}>
+                {item.title}
+              </div>
+              <div className="row-sub">waiting on {item.blockers.join(', ')}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Curriculum phases. Status carries the meaning, so it is spelled out in a
  *  label rather than encoded as colour alone. */
-function Curriculum({ prep, askAssistant }) {
+function Curriculum({ prep }) {
   const phases = prep?.phases ?? []
   if (!phases.length) {
     return <p className="muted small">No curriculum phases set up yet.</p>
@@ -85,15 +309,6 @@ function Curriculum({ prep, askAssistant }) {
           )}
         </div>
       ))}
-      {askAssistant && (
-        <button
-          className="btn small"
-          style={{ marginTop: 4, alignSelf: 'flex-start' }}
-          onClick={() => askAssistant('Give me the next problem for my current milestone.')}
-        >
-          Next problem
-        </button>
-      )}
     </div>
   )
 }
@@ -147,6 +362,8 @@ export default function Dsa({
   problems,
   stats,
   queue,
+  nextUp,
+  coach,
   prep,
   readiness,
   meta,
@@ -190,7 +407,11 @@ export default function Dsa({
       <div className="tiles">
         <Tile label="Problems solved" value={stats.solved ?? 0} note={`${stats.total ?? 0} tracked`} />
         <Tile label="Solve rate" value={pct(stats.solve_rate)} note={`${stats.stuck ?? 0} stuck`} />
-        <Tile label="Avg time" value={`${stats.avg_time_minutes ?? 0}m`} note={`${stats.avg_attempts ?? 0} attempts avg`} />
+        <Tile
+          label="Avg time"
+          value={`${stats.avg_time_minutes ?? 0}m`}
+          note={`${stats.timed ?? 0} of ${stats.solved ?? 0} timed`}
+        />
         <Tile label="Hint rate" value={pct(stats.hint_rate)} note="of solved problems" />
         <Tile label="Per week" value={stats.solved_per_week ?? 0} note="last 4 weeks" />
         <Tile label="Due for revision" value={stats.revision_due ?? 0} note={`${stats.issues_logged ?? 0} issues logged`} />
@@ -211,6 +432,15 @@ export default function Dsa({
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))' }}>
+        <Card title="Do this next" sub="Weakness before curriculum — and it shows its working">
+          <Coach
+            coach={coach}
+            nextUp={nextUp}
+            reload={reload}
+            askAssistant={askAssistant}
+          />
+        </Card>
+
         <Card title="By difficulty" sub="How many attempted, and how many landed">
           <BarRows
             items={difficultyRows.filter((r) => r.value > 0)}
@@ -230,7 +460,7 @@ export default function Dsa({
         </Card>
 
         <Card title="Curriculum" sub="Phases and where you are in them">
-          <Curriculum prep={prep} askAssistant={askAssistant} />
+          <Curriculum prep={prep} />
         </Card>
 
         <Card
@@ -370,7 +600,15 @@ function ProblemRow({ problem, meta, open, onToggle, reload }) {
             ))}
           </select>
         </td>
-        <td className="num">{problem.time_spent_minutes ? `${problem.time_spent_minutes}m` : '—'}</td>
+        <td className="num" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {problem.timer?.started_at
+            ? `● ${clock(problem.elapsed_seconds)}`
+            : problem.time_spent_minutes
+              ? `${problem.time_spent_minutes}m`
+              : problem.elapsed_seconds
+                ? clock(problem.elapsed_seconds)
+                : '—'}
+        </td>
         <td className="num">{problem.confidence ? `${problem.confidence}/5` : '—'}</td>
       </tr>
       {open && (
@@ -393,8 +631,13 @@ function ProblemRow({ problem, meta, open, onToggle, reload }) {
                     Open problem ↗
                   </a>
                 )}
+                <div style={{ marginTop: 12 }}>
+                  <Field label="Stopwatch">
+                    <Stopwatch problem={problem} reload={reload} />
+                  </Field>
+                </div>
                 <div className="field-row" style={{ marginTop: 12 }}>
-                  <Field label="Minutes">
+                  <Field label="Minutes (overrides the clock)">
                     <input
                       type="number"
                       defaultValue={problem.time_spent_minutes ?? ''}
