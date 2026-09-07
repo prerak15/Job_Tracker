@@ -20,14 +20,16 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   design.py      system design study (LLD/HLD)
   patterns.py    pattern revision across DSA + design
   pattern_seed.py the sheet's 16 DSA patterns + an LLD/HLD set (data, not logic)
+  skills.py      skill gaps, read out of the stored job descriptions
+  skill_seed.py  the starting skill catalogue (data, not logic)
   prep.py        curriculum phases, standing weaknesses, cross-domain readiness
-  ai.py          chat agent, ~60 in-process tools
+  ai.py          chat agent, ~70 in-process tools
   main.py        REST routes
   selftest.py    every domain, against a temp dir — no server needed
-frontend/    Vite + React dashboard (6 tabs + chat drawer)
+frontend/    Vite + React dashboard (7 tabs + chat drawer)
   src/cache.js   session cache — survives a browser refresh
   src/refresh.js the auto-refresh loop
-data/        the database — seven JSON files, GITIGNORED
+data/        the database — eight JSON files, GITIGNORED
 ```
 
 **Never commit anything under `data/`.** The repo is meant to be shareable; the
@@ -401,9 +403,134 @@ Foundations", which it isn't. Pattern study is a parallel track to the
 curriculum, so promoted work lands in the backlog until a phase is set
 deliberately.
 
+### `data/skills.json` — `{"skills": [...]}`
+
+The fourth axis, and the only one that points outward. `dsa.json` tracks a
+problem, `prep.json` the phase above it and `patterns.json` the technique —
+all three measure work already chosen. This one measures the **market**: what
+the postings in `jobs.json` keep asking for that he cannot supply.
+
+Seeded from `skill_seed.py` (`POST /api/skills/seed`, idempotent).
+
+| Field | Notes |
+|---|---|
+| `key` | the identity, not `id` — routes take the key, like `patterns.py` and `prep.py` |
+| `aliases[]` | **the join wiring.** What matches the skill against a JD and against a resume; see the matching rules below |
+| `level` | 0 none · 1 aware · 2 used · 3 built · 4 shipped. The one signal neither join can supply |
+| `target_level` | what "closed" means here; defaults to 3 (`built`), not `shipped` — a bar only production work can clear is one no personal project reaches |
+| `effort` | `days` `weeks` `months`, and it feeds the rank: this is a work queue, not a wishlist |
+| `status` | `wanted` `learning` `declined` `done`. `declined` is the load-bearing one — see below |
+| `plan` | the concrete closing move, not the topic. "Deploy the tracker to a kind cluster", not "learn Kubernetes" |
+| `log[]` | `{date, note, level}` — what actually moved the level |
+
+**Everything about demand and claims is joined in at read time and never
+stored.** `demand`, `mentions`, `organisations`, `claimed`, `state`, `score`
+and `rank` are recomputed from `jobs.json` and `resumes.json` on every read —
+the same choice `companies.py` and `patterns.py` make, for the same reason.
+This is also the whole feature: paste a posting on the Applications tab and the
+ranking reorders itself, with nothing to refresh and nothing that can drift.
+`selftest.py` asserts none of it reaches the file.
+
+#### Two joins, and the second is the interesting one
+
+`jobs.json` supplies demand. `resumes.json` supplies `claimed`, and
+**claimed with nothing behind it is not a gap, it is a live credibility risk** —
+the reader has already been told he has it, so the question is coming. That
+state (`exposed`) is worth more than any count, and neither file can see it
+alone.
+
+The resume join reads the **skills section only**, via `skills.claim_text`.
+A skills row is where a claim is *made*; prose is evidence, and evidence is
+fine. Matching the whole document flagged half the catalogue: a bullet reading
+"raised outreach throughput from 30 to 200 emails/hour" contains "throughput"
+and claims nothing about performance engineering.
+
+#### Matching — `skills.mentions`, and why it looks paranoid
+
+Same lesson as `discover.py`, learned the same way. Every one of these actually
+fired against `data/jobs.json`:
+
+| Alias | Matched | Fix |
+|---|---|---|
+| `eks` | "features live within w**eeks**" | boundary anchors |
+| `scala` | "**scala**ble solutions" | boundary anchors |
+| `ai` | "Ret**ai**l" | boundary anchors |
+| `design document` | *missed* "design documents" | optional plural |
+| `voice pipeline` | *missed* the entire Weekday posting | optional plural + `_VOICE` |
+| `Go` | "**Go** ahead, apply anyway" | `_GO` guard |
+| `streaming` | "SSE **Streaming**" in seven resumes | `_STREAMING` guard |
+
+So: aliases anchor on identifier boundaries (not `\b`, which falls in the
+middle of `C++`, `.NET` and `CI/CD`), tolerate a trailing plural, and an alias
+prefixed **`re:`** is a raw pattern matched case-sensitively. Every `re:` alias
+in `skill_seed.py` carries a comment naming the false positive it kills — the
+last two above cannot be fixed by anchoring, because they are real
+word-boundary matches on real English.
+
+`_normalize` inserts the name as an alias **only when the list is empty**. An
+earlier version always appended it, which quietly put the bare `Go` back behind
+the guard written to exclude it. If the author supplied aliases, the author is
+in charge.
+
+#### The ranking
+
+`gap_queue()` is ordered by
+
+```
+round(10 * log2(1 + weighted_demand)) + gap * 5 + effort_bonus + exposed_bonus
+```
+
+where a mention is weighted by the job's status (`interviewing` 4 … `rejected`
+1 — a live application is a question that could be asked next week; a rejected
+one is still market signal), `effort_bonus` is 4/2/0 for days/weeks/months, and
+`exposed_bonus` is 6.
+
+Demand **saturates** rather than accumulating: one posting to four is a real
+change in what the market is saying, eight to nine is noise. Counted straight,
+a word every JD uses in passing ("code review") outranks a stated hard
+requirement ("Kubernetes") on frequency alone, and a ranked list that does that
+stops being read.
+
+Every branch appends to `because[]`, for the same reason `dsa.coach()` does —
+this one reorders itself whenever a job is added, so it *will* look wrong
+eventually and has to defend itself when it does.
+
+Rows with no demand are **out of the queue entirely**. The board is driven by
+the pipeline; a catalogue row nothing has asked for is a row waiting for a
+posting to justify it, and `stats()["no_demand"]` counts those.
+
+#### `declined`, and why demand still counts under it
+
+A skill only one posting ever wanted is a real requirement and still the wrong
+thing to learn. `decline(key, reason)` — **a reason is required**, because "not
+doing this" with no why is indistinguishable from having forgotten — drops it
+from the queue while its demand keeps updating. That is what makes the decision
+re-readable later against a number that has moved, instead of a dead entry
+nobody revisits.
+
+#### Two lists, and these ones may overlap
+
+`gap_queue()` says "acquire this"; `exposed()` says "this claim is unbacked".
+Unlike `dsa.py`'s and `patterns.py`'s pairs they are **deliberately not
+disjoint** — they are not two answers to the same question, and a skill that is
+both in demand and falsely claimed genuinely needs both actions. Forcing them
+apart would mean dropping one of two things that are both true.
+
+#### Skills already held belong in the catalogue
+
+They are the denominator for `stats()["coverage"]`. A file containing only gaps
+reports 0% forever and says nothing. Rows at or above `target_level` drop out of
+the queue on their own.
+
+**Only `log_evidence` moves a level**, and it requires a note. Self-ratings
+drift upward without a record behind them, and an inflated level becomes a
+question that cannot be answered in an interview — which is the exact failure
+`exposed` exists to catch. `for_job(job_id)` is the pre-application view: what
+*this* posting screens on, rather than the pipeline's average.
+
 ### Cross-domain: `prep.readiness()`
 
-The one view that joins all four domains — scheduled rounds from `jobs.json`
+The one view that joins the practice domains — scheduled rounds from `jobs.json`
 are the deadline, and the DSA queue, design queue and standing weaknesses are
 what you have to turn up with. Prep coverage is matched by **company tag**
 (case-insensitive against `organisation`), so `untagged_companies` lists live

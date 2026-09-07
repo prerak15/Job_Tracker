@@ -79,6 +79,13 @@ const PILL_TONE = {
   completed: 'green',
   current: 'orange',
   upcoming: '',
+  // Skill states. "exposed" is red because it is a live risk rather than a
+  // gap — the claim is already on a resume someone is reading.
+  have: 'green',
+  exposed: 'red',
+  learning: 'orange',
+  missing: '',
+  declined: '',
 }
 
 export function Pill({ children, tone }) {

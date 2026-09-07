@@ -146,6 +146,31 @@ export const api = {
     promote: (key, body) => post(`/patterns/${key}/promote`, body),
   },
 
+  skills: {
+    // Demand and resume claims are joined in by the backend on every read, so
+    // there is nothing here to invalidate after a job or a resume changes.
+    list: (params = {}) => {
+      const qs = new URLSearchParams(
+        Object.entries(params).filter(([, v]) => v !== null && v !== undefined && v !== ''),
+      ).toString()
+      return get(`/skills${qs ? `?${qs}` : ''}`)
+    },
+    get: (key) => get(`/skills/${key}`),
+    create: (body) => post('/skills', body),
+    update: (key, body) => patch(`/skills/${key}`, body),
+    remove: (key) => del(`/skills/${key}`),
+    stats: () => get('/skills/stats'),
+    // Ranked "acquire this next".
+    gapQueue: (limit) => get(`/skills/gap-queue${limit ? `?limit=${limit}` : ''}`),
+    // Resume claims with nothing behind them. Overlaps gapQueue on purpose.
+    exposed: () => get('/skills/exposed'),
+    declined: () => get('/skills/declined'),
+    forJob: (jobId) => get(`/skills/for-job/${jobId}`),
+    seed: () => post('/skills/seed'),
+    logEvidence: (key, body) => post(`/skills/${key}/evidence`, body),
+    decline: (key, reason) => post(`/skills/${key}/decline`, { reason }),
+  },
+
   design: {
     list: () => get('/design'),
     create: (body) => post('/design', body),

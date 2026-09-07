@@ -608,6 +608,158 @@ print(
     f"{ps['due']} due, {ps['unstarted']} unstarted"
 )
 
+# ------------------------------------------------------------------ skills
+import skill_seed  # noqa: E402
+import skills  # noqa: E402
+
+# Matching is the whole domain: a careless alias invents demand that was never
+# there, and nothing about the number it produces looks wrong. Every case here
+# is one that actually fired against data/jobs.json while the board was built.
+assert skills.mentions("Kubernetes at scale", ["Kubernetes"]) == "Kubernetes"
+assert skills.mentions("features live within weeks", ["EKS"]) is None
+assert skills.mentions("building scalable solutions", ["Scala"]) is None
+assert skills.mentions("Java, Ruby, Clojure, Scala, C", ["Scala"]) == "Scala"
+assert skills.mentions("JavaScript and TypeScript", ["Java"]) is None
+assert skills.mentions("Retail, Sales, Operations", ["AI"]) is None
+assert skills.mentions("experience with C++ and C", ["C++"]) == "C++"
+# Plurals: postings are written in them, and an alias in the singular saw none
+# of the Weekday voice role at all.
+assert skills.mentions("authored design documents", ["design document"])
+assert skills.mentions("maintain voice pipelines", [skill_seed._VOICE])
+assert skills.mentions("autonomous voice agent", [skill_seed._VOICE])
+# The guarded ones. Each exists because of a specific false positive.
+assert skills.mentions("Go ahead, apply anyway", [skill_seed._GO]) is None
+assert skills.mentions("Working knowledge of Go and Spark", [skill_seed._GO]) == "Go"
+assert skills.mentions("Java/Go; REST APIs", [skill_seed._GO]) == "Go"
+assert skills.mentions("Redis/BullMQ Queues, SSE Streaming", [skill_seed._STREAMING]) is None
+assert skills.mentions("batch and streaming data", [skill_seed._STREAMING])
+
+# A skill with explicit aliases must not silently gain its name as one: the Go
+# row lists a guard precisely to keep "Go ahead" out, and appending the bare
+# name behind it put the false positive straight back.
+guarded = skills._normalize({"key": "golang", "name": "Go", "aliases": [skill_seed._GO]})
+assert guarded["aliases"] == [skill_seed._GO], guarded["aliases"]
+assert skills._normalize({"key": "k", "name": "Kafka"})["aliases"] == ["Kafka"]
+
+# A claim is made in the skills section; prose is evidence, not a claim. This
+# resume mentions throughput in a bullet and lists C/C++ under Languages, and
+# only the second is a claim about a capability.
+resume_text = """Prerak Gupta
+Bengaluru, India
+
+WORK EXPERIENCE
+- Raised outreach throughput from 30 to 200 emails per hour.
+
+SKILLS & CERTIFICATIONS
+Languages: Python, SQL, C/C++
+"""
+claims = skills.claim_text(resume_text)
+assert "C/C++" in claims and "throughput" not in claims, claims
+assert skills.claim_text("no headings here") == "no headings here"
+
+seeded = skills.seed(skill_seed.SKILLS)
+assert seeded["added"] == len(skill_seed.SKILLS), seeded
+assert skills.seed(skill_seed.SKILLS)["added"] == 0, "seeding twice must add nothing"
+
+seed_keys = [s["key"] for s in skill_seed.SKILLS]
+assert len(set(seed_keys)) == len(seed_keys), "duplicate skill key in the seed"
+for entry in skill_seed.SKILLS:
+    assert entry["aliases"], f"{entry['key']} would never match anything"
+    assert entry.get("area", "practice") in skills.AREAS, entry["key"]
+    assert entry.get("effort", "weeks") in skills.EFFORTS, entry["key"]
+    # A row that is neither held nor declined has to say how it gets closed.
+    if entry.get("status") not in ("declined", "done") and entry.get("level", 0) < 3:
+        assert entry.get("plan", "").strip(), f"{entry['key']} has no plan"
+
+# The job created at the top of this file lists Kafka, gRPC and distributed
+# systems, so demand for those is joined in — from jobs.json, on this read.
+board = {s["key"]: s for s in skills.list_skills()}
+assert board["grpc"]["demand"] == 1, board["grpc"]["mentions"]
+assert board["streaming"]["demand"] == 1
+assert board["kubernetes"]["demand"] == 0, "nothing in the fixture asks for it"
+assert board["grpc"]["organisations"] == ["Acme Corp"]
+
+# Nothing derived may ever reach the file — the same guarantee patterns.py and
+# companies.py make. A stored copy of "have I done this" eventually disagrees
+# with the domain that owns it, and the stale one is the one being read.
+raw = json.loads((tmp / "skills.json").read_text(encoding="utf-8"))["skills"][0]
+for derived in ("demand", "mentions", "claimed", "state", "score", "because", "rank"):
+    assert derived not in raw, f"{derived} was persisted"
+
+# Demand-free rows stay out of the ranked queue: this board is driven by the
+# pipeline, and a row nothing has asked for is not a priority.
+queue = skills.gap_queue()
+assert all(row["demand"] > 0 for row in queue), "a queue row with no demand"
+assert all(row["state"] not in ("have", "declined") for row in queue)
+assert [row["rank"] for row in queue] == list(range(1, len(queue) + 1))
+assert queue == sorted(queue, key=lambda r: (-r["score"], -r["demand_weighted"], r["name"])), (
+    "the queue is not in its own rank order"
+)
+assert queue[0]["because"], "a ranking nobody can audit gets ignored"
+
+# Declining drops a skill from the queue but not from the demand count — that
+# is what lets the decision be re-read later against a number that has moved.
+before = len(skills.gap_queue())
+skills.decline("grpc", "one posting only")
+assert len(skills.gap_queue()) == before - 1
+assert skills.get_skill("grpc")["demand"] == 1, "declining must not hide the demand"
+assert [d["key"] for d in skills.declined() if d["key"] == "grpc"] == ["grpc"]
+try:
+    skills.decline("streaming", "   ")
+except ValueError:
+    pass
+else:
+    raise AssertionError("declining without a reason must fail")
+
+# Evidence is the only thing that moves a level, and it always leaves a note.
+moved = skills.log_evidence("kubernetes", "Deployed the tracker to a kind cluster", 3)
+assert moved["level"] == 3 and moved["status"] == "done", moved
+assert moved["state"] == "have" and moved["log"][-1]["note"].startswith("Deployed")
+assert moved["evidence"].startswith("Deployed")
+try:
+    skills.log_evidence("kubernetes", "  ")
+except ValueError:
+    pass
+else:
+    raise AssertionError("evidence without a note must fail")
+
+# exposed() is allowed to overlap gap_queue() — unlike dsa.py's and patterns.py's
+# pairs, they answer different questions and a skill can genuinely need both.
+skills.update_skill("java", {"level": 0})
+skills.create_skill(
+    {
+        "key": "selftest-claim",
+        "name": "Selftest Claim",
+        "aliases": ["Selftest Claim"],
+        "level": 0,
+        "plan": "n/a",
+    }
+)
+resumes.create_resume(
+    {
+        "name": "selftest",
+        "content": "Name\n\nSKILLS\nLanguages: Selftest Claim\n",
+    }
+)
+claimed = {s["key"]: s for s in skills.list_skills()}["selftest-claim"]
+assert claimed["claimed"] and claimed["state"] == "exposed", claimed["claimed_on"]
+assert "selftest-claim" in [s["key"] for s in skills.exposed()]
+
+for_job = skills.for_job(job["id"])
+assert for_job["has_description"]
+assert "grpc" in [s["key"] for s in for_job["declined"]]
+assert "python" in [s["key"] for s in for_job["covered"]], for_job["covered"]
+
+sk = skills.stats()
+assert sk["total"] == len(skill_seed.SKILLS) + 1, sk
+assert sk["jds_read"] >= 1 and 0 <= sk["coverage"] <= 100, sk
+assert sk["by_state"]["declined"] >= 1 and sk["exposed"] >= 1
+assert len(sk["next"]) <= 3
+print(
+    f"skills OK   {sk['total']} skills, {sk['jds_read']} JDs read, "
+    f"{sk['open']} open, {sk['exposed']} exposed, coverage {sk['coverage']}%"
+)
+
 # ------------------------------------------------------- companies + discovery
 import companies  # noqa: E402
 import company_seed  # noqa: E402

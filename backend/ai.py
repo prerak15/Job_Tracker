@@ -40,6 +40,8 @@ import pattern_seed
 import patterns
 import prep
 import resumes
+import skill_seed
+import skills
 import storage
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1275,6 +1277,209 @@ async def save_discovered_role_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# skill gap tools
+# --------------------------------------------------------------------------
+
+
+@tool(
+    "get_skill_gaps",
+    "The ranked list of skills to acquire, read out of the job descriptions "
+    "stored on the applications. Demand is recomputed from jobs.json on every "
+    "call, so adding a posting changes this list — there is nothing to refresh. "
+    "Each row carries `because`: say why a skill ranks where it does rather "
+    "than just naming it. Use this for 'what should I learn', 'what am I "
+    "missing', 'what do these JDs keep asking for'.",
+    schema({"limit": INT}),
+)
+async def skill_gaps_tool(args: dict[str, Any]) -> dict[str, Any]:
+    limit = args.get("limit")
+    return _ok(skills.gap_queue(limit=int(limit) if limit else None))
+
+
+@tool(
+    "get_exposed_skills",
+    "Skills claimed in a stored resume's skills section with a level below "
+    "'used' behind them. These are live credibility risks, not gaps: the reader "
+    "has already been told he has it. Report which resume versions carry the "
+    "claim, and whether the master is one of them.",
+    schema({}),
+)
+async def exposed_skills_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok(skills.exposed())
+
+
+@tool(
+    "list_skills",
+    "The whole skill board, with live demand joined in from the stored job "
+    "descriptions. Filter by area (language, backend, data, ml, cloud, infra, "
+    "practice) or state (missing, learning, exposed, have, declined). Use "
+    "get_skill_gaps instead when the question is what to work on next.",
+    schema(
+        {
+            "area": {"type": "string", "enum": skills.AREAS},
+            "state": {
+                "type": "string",
+                "enum": ["missing", "learning", "exposed", "have", "declined"],
+            },
+            "query": STR,
+        }
+    ),
+)
+async def list_skills_tool(args: dict[str, Any]) -> dict[str, Any]:
+    text = (args.get("query") or "").strip()
+    board = (
+        skills.find_skills(text)
+        if text
+        else skills.list_skills(area=args.get("area"), state=args.get("state"))
+    )
+    # Trimmed: `mentions` carries a row per matching JD and would flood context.
+    return _ok(
+        [
+            {
+                k: s[k]
+                for k in (
+                    "key", "name", "area", "state", "level_name", "target_level",
+                    "effort", "demand", "demand_live", "organisations", "claimed",
+                    "on_master", "score", "plan", "evidence",
+                )
+            }
+            for s in board
+        ]
+    )
+
+
+@tool(
+    "get_skills_for_job",
+    "What one posting asks for, split into what he can supply and what he "
+    "can't. Use this before a tailoring or 'should I apply' conversation — it "
+    "names the gaps that specific JD will screen on, rather than the pipeline's "
+    "average.",
+    schema({"job_id": STR}, ["job_id"]),
+)
+async def skills_for_job_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _ok(skills.for_job(args["job_id"]))
+    except ValueError as exc:
+        return _err(str(exc))
+
+
+@tool(
+    "log_skill_evidence",
+    "Record something he actually did with a skill, and raise its level. "
+    "Levels are 0 none, 1 aware, 2 used, 3 built, 4 shipped. Only call this "
+    "when he describes real work — the note becomes the evidence line a resume "
+    "bullet or an interview answer is built from, so it has to be a thing, not "
+    "a feeling. Never raise a level because he says he has been reading about it.",
+    schema(
+        {
+            "key": STR,
+            "note": {"type": "string", "description": "What he actually built or ran"},
+            "level": {"type": "integer", "description": "0-4, the new level"},
+            "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today"},
+        },
+        ["key", "note"],
+    ),
+)
+async def log_skill_evidence_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        skill = skills.log_evidence(
+            args["key"], args["note"], args.get("level"), args.get("date")
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok(skill) if skill else _err("No skill with that key.")
+
+
+@tool(
+    "update_skill",
+    "Change a skill's plan, notes, effort, target or aliases. Demand, claims "
+    "and rank are all computed from jobs.json and resumes.json, so never try to "
+    "set them. To move a level, use log_skill_evidence — a level with no dated "
+    "note behind it is the thing this board exists to prevent.",
+    schema(
+        {
+            "key": STR,
+            "plan": {"type": "string", "description": "The concrete closing move"},
+            "notes": STR,
+            "effort": {"type": "string", "enum": skills.EFFORTS},
+            "target_level": INT,
+            "aliases": STR_LIST,
+            "status": {"type": "string", "enum": skills.STATUSES},
+        },
+        ["key"],
+    ),
+)
+async def update_skill_tool(args: dict[str, Any]) -> dict[str, Any]:
+    patch = {k: v for k, v in args.items() if k != "key" and v is not None}
+    skill = skills.update_skill(args["key"], patch)
+    return _ok(skill) if skill else _err("No skill with that key.")
+
+
+@tool(
+    "decline_skill",
+    "Stop chasing a skill, with the reason recorded. Use this for something "
+    "only one posting ever asked for. It drops out of the ranked queue but its "
+    "demand keeps counting, so the decision resurfaces on its own if more "
+    "postings start asking.",
+    schema({"key": STR, "reason": STR}, ["key", "reason"]),
+)
+async def decline_skill_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        skill = skills.decline(args["key"], args["reason"])
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok(skill) if skill else _err("No skill with that key.")
+
+
+@tool(
+    "add_skill",
+    "Add a skill the catalogue is missing. `aliases` is what matches it against "
+    "job descriptions, so it is the field that matters: include the spellings a "
+    "posting would actually use. Never use a two-letter alias or an ordinary "
+    "English word — 'AI' matches 'retail' and 'Go' matches 'go ahead'.",
+    schema(
+        {
+            "key": {"type": "string", "description": "kebab-case identity, e.g. 'kubernetes'"},
+            "name": STR,
+            "area": {"type": "string", "enum": skills.AREAS},
+            "aliases": STR_LIST,
+            "level": INT,
+            "effort": {"type": "string", "enum": skills.EFFORTS},
+            "plan": STR,
+        },
+        ["key", "name", "aliases"],
+    ),
+)
+async def add_skill_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _ok(skills.create_skill(args))
+    except ValueError as exc:
+        return _err(str(exc))
+
+
+@tool(
+    "seed_skill_board",
+    "Load the curated skill catalogue. Idempotent — only adds what is missing "
+    "and never clobbers a level, plan or decision. Offer this once if the board "
+    "is empty.",
+    schema({}),
+)
+async def seed_skills_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok(skills.seed(skill_seed.SKILLS))
+
+
+@tool(
+    "get_skill_stats",
+    "Headline numbers for the skill board: how many JDs were read, coverage of "
+    "what they ask for, the state breakdown, the most-demanded skills, and the "
+    "top three of the ranked queue.",
+    schema({}),
+)
+async def skill_stats_tool(args: dict[str, Any]) -> dict[str, Any]:
+    return _ok(skills.stats())
+
+
+# --------------------------------------------------------------------------
 # agent wiring
 # --------------------------------------------------------------------------
 
@@ -1338,6 +1543,16 @@ TOOLS = [
     company_stats_tool,
     discover_roles_tool,
     save_discovered_role_tool,
+    list_skills_tool,
+    skill_gaps_tool,
+    exposed_skills_tool,
+    skills_for_job_tool,
+    log_skill_evidence_tool,
+    update_skill_tool,
+    decline_skill_tool,
+    add_skill_tool,
+    seed_skills_tool,
+    skill_stats_tool,
 ]
 
 # WebFetch joins WebSearch so the assistant can read a posting it found for a
@@ -1352,10 +1567,11 @@ ALLOWED_TOOLS = [f"mcp__{SERVER_NAME}__{t.name}" for t in TOOLS] + ["WebSearch",
 # dynamic part, so it is prepended instead.
 _SYSTEM_PROMPT = """You are the assistant for Prerak's personal job-search tracker.
 
-You maintain six things: job applications, the company board, resume versions,
-DSA practice, system design study, and pattern revision across the last two.
-You have tools for all of them — use them rather than just replying, because
-the dashboard reads what you write.
+You maintain seven things: job applications, the company board, resume versions,
+DSA practice, system design study, pattern revision across the last two, and the
+skill board — what the stored job descriptions keep asking for that he cannot
+supply. You have tools for all of them — use them rather than just replying,
+because the dashboard reads what you write.
 
 How to handle common messages:
 
@@ -1478,6 +1694,38 @@ Managing the board itself:
   genuinely know which board they use; a wrong token silently returns another
   company's jobs, so "none" plus a careers_url is the honest default.
 - If the board is empty, offer seed_company_board once.
+
+The skill board — what the postings ask for against what he can actually supply.
+
+- "What should I learn / what am I missing / what do these JDs keep asking for?"
+  -> get_skill_gaps. It is already ranked, so lead with the top row and its
+  `because` list rather than reciting the whole queue. Never present it as a
+  list of everything wrong: the ranking is the answer, and a wall of gaps is
+  the thing people stop reading.
+- Demand is recomputed from the stored job descriptions on every call. Nothing
+  needs refreshing after a job is added, and you must never "update" a demand
+  count, a rank or a claim — they are joins, not fields. What you can write is
+  the plan, the notes, the effort, the aliases and a decision.
+- get_exposed_skills is a different question and a more urgent one: things
+  claimed in a resume's skills section with nothing behind them. Say which
+  versions carry the claim. If the master is one of them, that claim is on
+  every send and it is the first thing to deal with.
+- Before a tailoring conversation, or when he asks whether to apply somewhere
+  -> get_skills_for_job. That names what this specific posting will screen on,
+  which is a better answer than the pipeline's average.
+- When he describes real work on a skill -> log_skill_evidence with what he
+  actually built and the new level. Levels are 0 none, 1 aware, 2 used, 3 built,
+  4 shipped. Reading about something is not level 2, and a level with no dated
+  note behind it is exactly what this board exists to prevent — so do not raise
+  one because he says he understands it.
+- A skill only one posting ever wanted -> offer decline_skill with a reason,
+  rather than leaving it to nag. Its demand keeps counting either way, so if
+  more postings start asking, the decision comes back on its own.
+- Two things this board must not become. It is not a study plan: dsa.coach()
+  answers "what now" for practice, and this answers "what does the market keep
+  asking for", at a different altitude. And it is not licence to pad a resume —
+  if a JD wants something the board says is `missing`, the resume still leaves
+  it out and you still name the gap in your reply.
 
 Pattern revision — he now studies pattern-wise, so there is a third axis above
 individual problems: the technique, tracked across both DSA and system design.

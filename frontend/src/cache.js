@@ -19,7 +19,7 @@ const NAMESPACE = 'job-tracker:'
 // Bump when a cached shape changes in a way an old entry can't satisfy. Old
 // entries then become unreadable, so they are swept at load rather than left
 // occupying the session's storage budget for the rest of the tab's life.
-const CACHE_VERSION = 2
+const CACHE_VERSION = 3
 const PREFIX = `${NAMESPACE}v${CACHE_VERSION}:`
 
 // Every key in one place — a typo'd string literal is a silently dead cache,

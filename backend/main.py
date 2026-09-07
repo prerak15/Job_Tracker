@@ -1,8 +1,8 @@
 """FastAPI app for the personal job tracker.
 
 Local-only: no auth, CORS open for localhost. Domains — applications, the
-company board, DSA practice, system design, pattern revision, resumes and the
-prep profile — plus an AI chat endpoint (ai.py) that writes through the same
+company board, DSA practice, system design, pattern revision, skill gaps read
+out of the stored job descriptions, resumes and the prep profile — plus an AI chat endpoint (ai.py) that writes through the same
 storage modules as these REST endpoints.
 """
 
@@ -27,6 +27,8 @@ import patterns
 import pdf_export
 import prep
 import resumes
+import skill_seed
+import skills
 import storage
 
 app = FastAPI(title="Job Tracker", version="1.0.0")
@@ -843,6 +845,139 @@ def post_pattern_promote(key: str, payload: PromoteProblemIn) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# skill gaps
+# --------------------------------------------------------------------------
+
+
+class SkillIn(BaseModel):
+    key: str
+    name: str
+    area: str = "practice"
+    aliases: list[str] = Field(default_factory=list)
+    level: int = 0
+    target_level: int = skills.DEFAULT_TARGET
+    effort: str = "weeks"
+    status: str = "wanted"
+    evidence: str = ""
+    plan: str = ""
+    notes: str = ""
+    order: int = 0
+
+
+class SkillPatch(BaseModel):
+    name: str | None = None
+    area: str | None = None
+    aliases: list[str] | None = None
+    level: int | None = None
+    target_level: int | None = None
+    effort: str | None = None
+    status: str | None = None
+    evidence: str | None = None
+    plan: str | None = None
+    notes: str | None = None
+    order: int | None = None
+
+
+class SkillEvidenceIn(BaseModel):
+    note: str
+    level: int | None = None
+    date: str | None = None
+
+
+class SkillDeclineIn(BaseModel):
+    reason: str
+
+
+@app.get("/api/skills")
+def get_skills(area: str | None = None, state: str | None = None) -> list[dict[str, Any]]:
+    """The board. Demand is joined from jobs.json on every read, never stored."""
+    return skills.list_skills(area=area, state=state)
+
+
+@app.get("/api/skills/stats")
+def get_skill_stats() -> dict[str, Any]:
+    return skills.stats()
+
+
+@app.get("/api/skills/gap-queue")
+def get_skill_gap_queue(limit: int | None = None) -> list[dict[str, Any]]:
+    """What to acquire next, ranked by what the stored JDs actually ask for."""
+    return skills.gap_queue(limit=limit)
+
+
+@app.get("/api/skills/exposed")
+def get_exposed_skills() -> list[dict[str, Any]]:
+    """Resume claims with nothing behind them. Overlaps the gap queue on purpose."""
+    return skills.exposed()
+
+
+@app.get("/api/skills/declined")
+def get_declined_skills() -> list[dict[str, Any]]:
+    """Consciously not being chased — with the demand still counted underneath."""
+    return skills.declined()
+
+
+@app.get("/api/skills/for-job/{job_id}")
+def get_skills_for_job(job_id: str) -> dict[str, Any]:
+    """What one posting asks for, split into covered and missing."""
+    try:
+        return skills.for_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/skills/seed")
+def post_skill_seed() -> dict[str, Any]:
+    """Load the curated catalogue. Idempotent — only adds what's missing."""
+    return skills.seed(skill_seed.SKILLS)
+
+
+@app.post("/api/skills", status_code=201)
+def post_skill(payload: SkillIn) -> dict[str, Any]:
+    try:
+        return skills.create_skill(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/skills/{key}")
+def get_one_skill(key: str) -> dict[str, Any]:
+    return _found(skills.get_skill(key), "Skill")
+
+
+@app.patch("/api/skills/{key}")
+def patch_skill(key: str, payload: SkillPatch) -> dict[str, Any]:
+    return _found(
+        skills.update_skill(key, payload.model_dump(exclude_unset=True)), "Skill"
+    )
+
+
+@app.delete("/api/skills/{key}", status_code=204)
+def remove_skill(key: str) -> None:
+    if not skills.delete_skill(key):
+        raise HTTPException(404, "Skill not found")
+
+
+@app.post("/api/skills/{key}/evidence")
+def post_skill_evidence(key: str, payload: SkillEvidenceIn) -> dict[str, Any]:
+    """Record what you actually did with it, and move the level."""
+    try:
+        return _found(
+            skills.log_evidence(key, payload.note, payload.level, payload.date), "Skill"
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/skills/{key}/decline")
+def post_skill_decline(key: str, payload: SkillDeclineIn) -> dict[str, Any]:
+    try:
+        return _found(skills.decline(key, payload.reason), "Skill")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# --------------------------------------------------------------------------
 # company board
 # --------------------------------------------------------------------------
 
@@ -1036,6 +1171,10 @@ def get_meta() -> dict[str, Any]:
         "phase_statuses": prep.PHASE_STATUSES,
         "standing_issue_categories": prep.ISSUE_CATEGORIES,
         "pattern_domains": patterns.DOMAINS,
+        "skill_areas": skills.AREAS,
+        "skill_statuses": skills.STATUSES,
+        "skill_levels": skills.LEVELS,
+        "skill_efforts": skills.EFFORTS,
         "company_statuses": companies.STATUSES,
         "company_tiers": companies.TIERS,
         "company_focus_areas": companies.FOCUS_AREAS,
@@ -1054,6 +1193,7 @@ def get_overview() -> dict[str, Any]:
         "resumes": resumes.stats(),
         "prep": prep.stats(),
         "patterns": patterns.stats(),
+        "skills": skills.stats(),
         "companies": companies.stats(),
         "followups_due": len(storage.followup_suggestions()),
     }

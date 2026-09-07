@@ -8,6 +8,7 @@ import Companies from './components/Companies'
 import Dsa from './components/Practice'
 import Patterns from './components/Patterns'
 import Resumes from './components/Resumes'
+import Skills from './components/Skills'
 import SystemDesign from './components/SystemDesign'
 
 const TABS = [
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'dsa', label: 'DSA' },
   { id: 'design', label: 'System Design' },
   { id: 'patterns', label: 'Patterns' },
+  { id: 'skills', label: 'Skills' },
   { id: 'resumes', label: 'Resumes' },
 ]
 
@@ -42,6 +44,11 @@ const EMPTY = {
   readiness: {},
   companies: [],
   companyStats: {},
+  skills: [],
+  skillStats: {},
+  skillQueue: [],
+  skillExposed: [],
+  skillDeclined: [],
 }
 
 export default function App() {
@@ -110,6 +117,11 @@ export default function App() {
         readiness,
         companies,
         companyStats,
+        skillList,
+        skillStats,
+        skillQueue,
+        skillExposed,
+        skillDeclined,
       ] = await Promise.all([
         api.meta(),
         api.jobs.list(),
@@ -133,6 +145,11 @@ export default function App() {
         api.prep.readiness(),
         api.companies.list(),
         api.companies.stats(),
+        api.skills.list(),
+        api.skills.stats(),
+        api.skills.gapQueue(),
+        api.skills.exposed(),
+        api.skills.declined(),
       ])
       const next = {
         meta,
@@ -157,6 +174,11 @@ export default function App() {
         readiness,
         companies,
         companyStats,
+        skills: skillList,
+        skillStats,
+        skillQueue,
+        skillExposed,
+        skillDeclined,
       }
       setData(next)
       setLastUpdated(Date.now())
@@ -189,6 +211,7 @@ export default function App() {
     dsa: data.dsaStats.solved ?? 0,
     design: data.designStats.practiced ?? 0,
     patterns: data.patternStats.by_state?.practiced ?? 0,
+    skills: data.skillStats.open ?? 0,
     resumes: data.resumeStats.total_versions ?? 0,
   }
 
@@ -301,6 +324,17 @@ export default function App() {
                   stats={data.patternStats}
                   queue={data.patternQueue}
                   unstarted={data.patternUnstarted}
+                  reload={reload}
+                  askAssistant={askAssistant}
+                />
+              )}
+              {activeTab === 'skills' && (
+                <Skills
+                  skills={data.skills}
+                  stats={data.skillStats}
+                  queue={data.skillQueue}
+                  exposed={data.skillExposed}
+                  declined={data.skillDeclined}
                   reload={reload}
                   askAssistant={askAssistant}
                 />
