@@ -51,6 +51,14 @@ REVISE_EVERY = 3
 # average is the only reason the stopwatch exists.
 STALE_SEGMENT_HOURS = 4
 
+# One attempt gets this long on the clock. Past it, more grinding stops teaching:
+# the solution is shown, the attempt is written down, and the problem comes back
+# cold REVISIT_AFTER_CAP_DAYS later to be re-derived rather than recalled. The
+# cap is per attempt, so ending one zeroes the clock -- a return visit that
+# started already over the line would hand the solution straight back.
+ATTEMPT_CAP_MINUTES = 40
+REVISIT_AFTER_CAP_DAYS = 14
+
 _DEFAULTS: dict[str, Any] = {
     "title": "",
     "platform": "leetcode",
@@ -166,6 +174,18 @@ def _bank(problem: dict[str, Any]) -> None:
     timer["started_at"] = None
 
 
+def _over_attempt_cap(problem: dict[str, Any]) -> bool:
+    """An open attempt whose clock has reached ATTEMPT_CAP_MINUTES.
+
+    Running or paused both count: a clock paused for review at 45 minutes
+    crossed the line before the solution arrived.
+    """
+    return (
+        problem.get("status") == "in_progress"
+        and elapsed_seconds(problem) >= ATTEMPT_CAP_MINUTES * 60
+    )
+
+
 def _public(problem: dict[str, Any]) -> dict[str, Any]:
     """A copy with the live stopwatch reading attached.
 
@@ -173,7 +193,58 @@ def _public(problem: dict[str, Any]) -> dict[str, Any]:
     a derived number that gets persisted is one that will eventually disagree
     with what derives it.
     """
-    return {**problem, "elapsed_seconds": elapsed_seconds(problem)}
+    return {
+        **problem,
+        "elapsed_seconds": elapsed_seconds(problem),
+        "over_attempt_cap": _over_attempt_cap(problem),
+    }
+
+
+def over_attempt_cap() -> list[dict[str, Any]]:
+    """Open attempts past the cap -- each one is owed its solution now."""
+    return [_public(p) for p in load()[KEY] if _over_attempt_cap(p)]
+
+
+def cap_attempt(problem_id: str, on: str | None = None) -> dict[str, Any] | None:
+    """End an attempt that ran past ATTEMPT_CAP_MINUTES.
+
+    The solution is being shown, so this is where the attempt gets written
+    down: its length goes into `issues[]` (the clock is about to be zeroed, so
+    this is the only record of it), `attempts` counts it, and `used_hint` is
+    set because an eventual solve will not have been unaided. Then the problem
+    is deferred with a review date, which is what brings it back.
+    """
+    stamp = on or today()
+    with _lock:
+        data = load()
+        for idx, problem in enumerate(data[KEY]):
+            if problem["id"] != problem_id:
+                continue
+            _bank(problem)
+            minutes = round(int(problem["timer"]["accumulated_seconds"] or 0) / 60)
+            problem["issues"].append(
+                {
+                    "date": stamp,
+                    "issue": f"Hit the {ATTEMPT_CAP_MINUTES}-minute attempt cap "
+                    f"after {minutes} min; solution shown.",
+                }
+            )
+            problem["attempts"] = int(problem.get("attempts") or 0) + 1
+            problem["used_hint"] = True
+            problem["timer"] = {"started_at": None, "accumulated_seconds": 0, "capped": False}
+            problem["status"] = "deferred"
+            problem["defer"] = {
+                "reason": f"Attempt capped at {ATTEMPT_CAP_MINUTES} min on {stamp}; "
+                "solution shown. Re-derive from scratch -- derivation, not recall.",
+                "until_solved": [],
+                "review_on": (
+                    date.fromisoformat(stamp) + timedelta(days=REVISIT_AFTER_CAP_DAYS)
+                ).isoformat(),
+            }
+            data[KEY][idx] = _normalize(problem)
+            write(FILE, data)
+            return _public(data[KEY][idx])
+        return None
 
 
 def load() -> dict[str, Any]:

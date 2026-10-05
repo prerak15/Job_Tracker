@@ -6,3 +6,9 @@ python-docx>=1.1
 # FastAPI already pulls httpx in for TestClient, but this is a direct
 # dependency now, so pin it as one.
 httpx>=0.27
+# scrape.py drives headless Chromium for careers pages with no JSON board; after
+# installing run:  python -m playwright install chromium
+# It imports playwright lazily, so the API and selftest.py do not need it.
+playwright>=1.49
+# roles_xlsx.py writes the scraper's workbook.
+openpyxl>=3.1

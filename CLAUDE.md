@@ -15,6 +15,8 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   companies.py   the company board — who to target
   company_seed.py curated India list, ~170 companies (data, not logic)
   discover.py    role discovery from public ATS boards
+  scrape.py      Playwright scraper for careers pages with no ATS board → Excel
+  roles_xlsx.py  the scraper's workbook writer (openpyxl)
   resumes.py     resume versions + JD tailoring
   dsa.py         DSA practice
   design.py      system design study (LLD/HLD)
@@ -130,11 +132,13 @@ would have "Ola" claiming every Olam job.
 
 ### Role discovery — `discover.py`
 
-**Do not add HTML scraping.** Greenhouse, Lever and Ashby each publish a
-documented public JSON endpoint that aggregators are meant to consume, and it is
-both stabler and more polite than parsing a careers page that changes on the
-next redesign. Companies with no supported board keep `ats_provider: "none"`,
-and the assistant falls back to `WebSearch` + `save_discovered_role` for those.
+**Do not add HTML scraping to this module.** Greenhouse, Lever and Ashby each
+publish a documented public JSON endpoint that aggregators are meant to consume,
+and it is both stabler and more polite than parsing a careers page that changes
+on the next redesign. Companies with no supported board keep
+`ats_provider: "none"`; the browser-based `scrape.py` (next section) covers those
+as a **separate module**, and the assistant's `WebSearch` + `save_discovered_role`
+is the fallback for whatever the scraper cannot read.
 
 Everything from `parse` down is a pure function over a decoded payload, so the
 normalise → filter → dedupe pipeline is tested against fixtures with no network
@@ -160,6 +164,135 @@ somebody else (`tcs` is a UK care provider, `slice` a US pizza company,
 belonged to unrelated US firms). Fetch the board and check `company_name`
 (Greenhouse) or a sample posting URL (Lever, Ashby). An honest `none` beats a
 guess.
+
+### Careers-page scraper — `scrape.py`
+
+For the companies with `ats_provider: "none"` — about 100 of the 171, nearly all
+on their own domains. **A run costs no tokens**: it is one command, no model in
+the loop, and it prints to the terminal only when something is wrong.
+
+```bash
+.venv/Scripts/python.exe backend/scrape.py --tier faang,tier1 --status target
+.venv/Scripts/python.exe backend/scrape.py --only "Nvidia" --probe      # re-detect one site
+```
+
+It opens each company's `careers_url` in headless Chromium (Playwright, imported
+lazily — the API and `selftest.py` never need it), applies your filters, extracts
+the roles and writes `exports/open-roles-<date>.xlsx`: **Roles**, **Filtered
+search links** (one clickable results page per company, written even when
+extraction failed), **Needs attention**, **Summary**. Install once with
+`python -m playwright install chromium`.
+
+Rules, and why:
+
+- **Filters live in `data/role-filters.json`** (created on first run;
+  `null` locations means the India list from `discover.py`). CLI flags override
+  for one run. `primary_query` is empty by default on purpose: baking
+  "software engineer" into a site's URL loses "Machine Learning Engineer", so the
+  site is read by location and the keywords filter client-side.
+- **Strategies, cheapest first:** `xhr` (the page's own JSON response — survives a
+  redesign), `dom` (hand-written selectors), `links` (anchors that look like job
+  paths). The winner is saved to `data/career-sites.json`, and a saved strategy
+  that stops working falls through to re-detection rather than failing.
+- **No login walls, no CAPTCHA bypass.** A 403/429, a challenge page or a login
+  wall is classed `blocked` and reported; LinkedIn is skipped outright. One visit
+  per company per run, three at a time. This is a personal tool, not a crawler.
+- A role with **no readable location** is trusted to the URL's own location filter
+  rather than dropped (`filter_scraped`) — link-only extraction often cannot read
+  one, and discover's filter would silently discard every such row.
+- **Under-coverage is a failure.** If a response reports a total and the scraper
+  read under half of it, the run says `partial` — a silently short list is worse
+  than a loud one.
+- Scraped text is untrusted: `roles_xlsx` pins every cell to a string, because
+  openpyxl turns a title beginning `=` into a formula.
+- Everything above the Playwright layer is a pure function, tested in
+  `selftest.py` with fixtures. Keep it that way: no browser, no network there.
+
+**When the scraper fails** it prints `FAIL <company> | <problem> | <detail> |
+<snapshot dir>` and writes `data/scrape-snapshots/<date>/<company>/`:
+`aria.txt` (the page's accessibility tree, ~200 lines), `network.txt` (every JSON
+response, with keys), `meta.json`, `console.txt`, `page.png`. **Read `aria.txt`
+and `network.txt` first; look at the screenshot only if they are ambiguous.**
+Then patch that company's entry in `data/career-sites.json` — the keys a person
+may set are `search_url` (put the location/keyword filter in the URL; `{q}` is
+the keyword), `max_pages`, `next` (a CSS selector for the pager), `selectors`
+(`item`, `title`, `link`, `location`, `posted`, `next`) for `dom`, and `ui_steps`
+(`fill` / `click` / `press` / `select` / `wait`) for filters the URL cannot carry —
+and re-run with `--only "<Company>"`. `--probe` re-detects the extraction but
+keeps those hand-written keys.
+
+Problems: `timeout`, `navigation`, `blocked`, `zero_extracted` (page loaded,
+nothing readable), `layout_changed` (roles fell below 30% of last time),
+`partial` (read under half the site's own total), `error`. `layout_changed`,
+`partial` and a `timeout` that had already read rows keep those rows. A page that
+says "there are no openings" is a real zero and reads `ok`, not a failure.
+
+**Strategy order is fixed** (`dom` only when selectors exist, then `xhr`, then
+`links`), never "whatever won last time": a saved `links` result of one page of
+cards once shadowed Nvidia's full JSON list, read 20 of 243 roles, and kept doing
+it. **Dedupe is by link, not title** (`dedupe_scraped`): Amazon posts hundreds of
+identically titled roles, each a real opening. The link key is `scrape.link_key`,
+**not** `discover._url_key`: the latter cuts at `?`/`#`, and PyjamaHR names a
+posting by `?job_id=` and MyNextHire by a `#…p=` blob, so cutting there collapsed
+a whole board into one row. Only tracking parameters (`utm_*`, `src`, …) are dropped.
+
+**Known boards** (`known_field_map`). Several job boards common in Indian startups
+return a JSON list with **no link field**, so `guess_field_map` can't see them, and
+their cards say "View and Apply" rather than the title, so `links` can't either.
+They are recognised by endpoint and the link is built from the id: Darwinbox
+(`/candidateapi/job/alljobs`), Kula (`careers.kula.ai`), PyjamaHR (uuid or slug),
+MyNextHire (the id goes into base64 JSON, `encode_id`) and Workable (`shortcode`).
+Add a board here when a second company turns up on it; a one-off gets a
+hand-written `endpoint` + `field_map` with `url_template`/`id` in
+`career-sites.json` instead (Juspay, Gnani.ai). Point `careers_url` at the board
+itself, not the marketing page, whenever one exists.
+
+`source_total` takes the **latest non-zero** total, not the largest: Workday
+reports it on page one only, and Workable loads the whole world before narrowing
+to the visitor's country, so its first total described a list nobody asked for.
+A site's `max_pages` raises the "Load more" clicks as well as the "next page" walk.
+
+**Entry links.** Many careers URLs are brochures. When nothing is readable the
+scraper follows the page's own way to its list (`pick_entry_link`: an iframe or
+link on a job-board host first, then "View open roles"-style text, never social
+links), up to three hops, and from a 404 starts again at the site root. A hop that
+works is saved as that site's `search_url`. Set `"no_hop": true` to stop it.
+
+**Workbooks are named by selection**: a full run writes
+`open-roles-<date>.xlsx`; `--tier`/`--status`/`--only` runs write
+`open-roles-<date>-<selection>.xlsx` and are compared only with earlier runs of
+the same selection, so a partial run never overwrites the daily file or skews its
+"New" column.
+
+**Bot protection is reported, not evaded.** He offered stealth tooling
+(2026-10-05) and it was declined: a stealth plugin or fingerprint spoofing exists to
+get past the very protection `blocked` is there to respect. The way through a
+blocked site is its underlying job board (a Workday/SuccessFactors/Lever link) —
+put that in `search_url` or `careers_url`, or ask him on the help list.
+
+#### Manual review and the help list
+
+He verifies every scraped company by hand, a couple a day. The record lives in
+`career-sites.json` per company, so it travels with the config it vouches for:
+
+```bash
+.venv/Scripts/python.exe backend/scrape.py --reviews                 # reviewed so far + next two
+.venv/Scripts/python.exe backend/scrape.py --review "Nvidia"         # visible browser, held open
+.venv/Scripts/python.exe backend/scrape.py --mark-reviewed "Nvidia" --verdict verified --note "..."
+```
+
+`--review` runs that one company **headed** (the browser is not hidden for a
+review) at slow speed, prints what was read and what matches the filters, then
+leaves the window on the filtered first page until he closes it. Verdicts are
+`verified` or `needs_fix`; `reviews[]` is a history and the latest one wins.
+`needs_fix` means fix the config, then review again. Review mode writes no workbook.
+
+A site that would cost more effort than it is worth goes on the **needs-your-help
+list** instead of being fought indefinitely — `--flag-help "<Company>" --note
+"<why>"` (a reason is required), `--unflag-help`, `--needs-help` to print it. The
+list is also the workbook's **Needs your help** sheet. Write the reason as the
+question he can answer ("404 — needs the current careers link", "blocked — is
+there a Workday/Lever board?"), not as a log line.
 
 ### `data/resumes.json` — `{"resumes": [...]}`
 
@@ -293,6 +426,33 @@ Marking a problem solved banks the running segment and fills
 `time_spent_minutes` — but only if the clock actually ran **and** the field is
 empty. A hand-entered figure for a problem solved away from the app is an
 explicit act and always wins.
+
+### The attempt cap — `ATTEMPT_CAP_MINUTES` (40)
+
+He set this himself: an attempt gets 40 minutes on the clock, and past the line
+he gets the full solution **whatever he has just typed** — "one more minute", a
+hint request, another rewrite. Honoured only when convenient, a cap is not one.
+This binds a Claude Code session in this folder exactly as it binds the web
+chat.
+
+- **The server enforces it, not the model's memory.** `ai.with_clock_note`
+  puts a `[stopwatch]` line in front of every chat turn while an open attempt
+  is past the cap. A rule that depends on the assistant remembering to check
+  fails on exactly the turn it matters. In a Claude Code session there is no
+  such hook, so check `dsa.over_attempt_cap()` (or the problem's
+  `over_attempt_cap`) before replying to anything during an attempt.
+- **Paused counts.** A clock paused for review at 45 minutes crossed the line
+  before the solution arrived. A solution that lands after the line still gets
+  reviewed, after the full solution, but the attempt stays capped.
+- **`cap_attempt()` is the one action.** It logs the attempt's length to
+  `issues[]`, bumps `attempts`, sets `used_hint`, defers the problem for
+  `REVISIT_AFTER_CAP_DAYS` (14), and **zeroes the clock**. The zeroing is what
+  makes the cap per attempt: without it the return visit would start already
+  over the line and hand the solution straight back. The issue entry is the
+  only record of the capped attempt's minutes, so `time_spent_minutes` on the
+  eventual solve measures the attempt that produced it.
+- Then give the solution the way he learns: the idea and its invariant first,
+  then clean code, a dry-run on a small input, and the complexity.
 
 ### Deferral — `status: "deferred"`
 

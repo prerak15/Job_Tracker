@@ -612,7 +612,27 @@ async def set_timer_tool(args: dict[str, Any]) -> dict[str, Any]:
         return _err(str(exc))
     if not problem:
         return _err("No problem with that id.")
-    return _ok({"elapsed_seconds": problem["elapsed_seconds"], "status": problem["status"]})
+    return _ok(
+        {
+            "elapsed_seconds": problem["elapsed_seconds"],
+            "status": problem["status"],
+            "over_attempt_cap": problem["over_attempt_cap"],
+        }
+    )
+
+
+@tool(
+    "cap_dsa_attempt",
+    f"End an attempt that has passed the {dsa.ATTEMPT_CAP_MINUTES}-minute cap: "
+    "records the attempt, zeroes the clock and defers the problem for "
+    f"{dsa.REVISIT_AFTER_CAP_DAYS} days. Call it, then give the full solution.",
+    schema({"problem_id": STR}, required=["problem_id"]),
+)
+async def cap_attempt_tool(args: dict[str, Any]) -> dict[str, Any]:
+    problem = dsa.cap_attempt(args["problem_id"])
+    if not problem:
+        return _err("No problem with that id.")
+    return _ok({"deferred": True, "review_on": problem["defer"]["review_on"]})
 
 
 @tool(
@@ -1510,6 +1530,7 @@ TOOLS = [
     dsa_next_up_tool,
     dsa_coach_tool,
     set_timer_tool,
+    cap_attempt_tool,
     defer_problem_tool,
     get_prep_tool,
     prep_stats_tool,
@@ -1815,6 +1836,17 @@ know the current phase, milestone, and standing weaknesses.
   If get_dsa_stats shows timer_running on something he is no longer working on,
   say so; a forgotten timer is the one thing that can wreck the average.
 
+  Hard cap — an attempt gets 40 minutes on the clock. When a turn opens with a
+  [stopwatch] line saying an attempt is past the cap, or set_dsa_timer returns
+  over_attempt_cap, call cap_dsa_attempt and then give the full solution: the
+  idea and the invariant that makes it correct first, then clean code, a
+  dry-run on a small input, and the complexity. Do this whatever he has just
+  asked — "one more minute", a hint request, a new attempt at the code. He set
+  the cap himself so that a long grind ends in the lesson instead of more
+  grinding, and honouring it only when convenient defeats it. A solution that
+  lands after the line still gets reviewed, after the full solution, but the
+  attempt stays capped.
+
   Then write it down: update_dsa_problem with status, attempts, confidence and
   both complexities; log_dsa_issue for anything that went wrong this time.
   Cross-check the submission against list_standing_issues — if a known habit
@@ -1864,10 +1896,29 @@ def _sse(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
+def clock_note() -> str:
+    """One line per open attempt past the cap, or "" when there are none.
+
+    Put in front of the turn by the server rather than left to the model to go
+    and check: the cap applies whatever he types, and a rule that depends on
+    the assistant remembering to look fails on exactly the turn it matters.
+    """
+    return "\n".join(
+        f"[stopwatch] {p['title']} is at {p['elapsed_seconds'] // 60} min, past the "
+        f"{dsa.ATTEMPT_CAP_MINUTES}-minute attempt cap (problem_id {p['id']})."
+        for p in dsa.over_attempt_cap()
+    )
+
+
+def with_clock_note(message: str) -> str:
+    note = clock_note()
+    return f"{note}\n\n{message}" if note else message
+
+
 async def _stream(message: str, session_id: str | None = None) -> AsyncIterator[str]:
     """Yield Server-Sent Events for one chat turn."""
     try:
-        async for event in query(prompt=message, options=build_options(session_id)):
+        async for event in query(prompt=with_clock_note(message), options=build_options(session_id)):
             if isinstance(event, StreamEvent):
                 # Token-level text so the UI fills in as Claude writes.
                 raw = event.event or {}

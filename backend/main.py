@@ -511,6 +511,11 @@ def post_dsa_defer(problem_id: str, payload: DeferIn) -> dict[str, Any]:
     )
 
 
+@app.post("/api/dsa/{problem_id}/cap")
+def post_dsa_cap(problem_id: str) -> dict[str, Any]:
+    return _found(dsa.cap_attempt(problem_id), "Problem")
+
+
 @app.post("/api/dsa/{problem_id}/revisit")
 def post_dsa_revisit(problem_id: str, payload: RevisitIn) -> dict[str, Any]:
     return _found(

@@ -448,9 +448,32 @@ try:
 except ValueError:
     pass
 
+# The attempt cap. Under the line nothing happens; over it -- running or paused
+# for review -- the attempt is owed its solution.
+grind = dsa.create_problem({"title": "Long grind"})
+dsa.set_timer(grind["id"], "start")
+_rewind(grind["id"], (dsa.ATTEMPT_CAP_MINUTES - 1) * 60)
+assert dsa.get_problem(grind["id"])["over_attempt_cap"] is False
+assert dsa.over_attempt_cap() == []
+_rewind(grind["id"], (dsa.ATTEMPT_CAP_MINUTES + 3) * 60)
+dsa.set_timer(grind["id"], "pause")
+assert dsa.get_problem(grind["id"])["over_attempt_cap"] is True, "a paused clock still crossed the line"
+assert [p["id"] for p in dsa.over_attempt_cap()] == [grind["id"]]
+
+capped = dsa.cap_attempt(grind["id"], on="2026-09-22")
+assert capped["status"] == "deferred" and capped["defer"]["review_on"] == "2026-10-06", capped["defer"]
+assert capped["attempts"] == 1 and capped["used_hint"] is True, capped
+assert f"after {dsa.ATTEMPT_CAP_MINUTES + 3} min" in capped["issues"][-1]["issue"], capped["issues"]
+# Zeroed, because the cap is per attempt: the return visit must start fresh
+# rather than already over the line.
+assert capped["timer"]["accumulated_seconds"] == 0 and capped["elapsed_seconds"] == 0
+assert capped["over_attempt_cap"] is False and dsa.over_attempt_cap() == []
+assert dsa.cap_attempt("no-such-id") is None
+
 # elapsed_seconds is derived, so it must never reach the file.
 raw = json.loads((tmp / "dsa.json").read_text(encoding="utf-8"))
 assert all("elapsed_seconds" not in p for p in raw["problems"]), "derived field was persisted"
+assert all("over_attempt_cap" not in p for p in raw["problems"]), "derived field was persisted"
 print("stopwatch OK", {k: dsa.stats()[k] for k in ("avg_time_minutes", "timed")})
 
 # ------------------------------------------------------------- patterns
@@ -935,6 +958,398 @@ assert promoted["source"] == "careers_page"
 assert promoted["organisation"] == "Acme Corp" and promoted["date_job_posted"] == "2026-07-20"
 print(f"discovery OK {len(everything)} parsed, {len(india)} after filters")
 
+# --- careers-page scraper: pure functions only — no browser, no network ----------
+# scrape.py imports Playwright lazily, so this block must pass with it uninstalled.
+import roles_xlsx  # noqa: E402
+import scrape  # noqa: E402
+
+# URLs: the site's own keyword parameter becomes {q}; a URL without one is untouched.
+tpl = scrape.keyword_template("https://x.example/jobs?location=India&q=engineer")
+assert "{q}" in tpl and "location=India" in tpl, tpl
+assert scrape.fill_url(tpl, "software engineer").count("software+engineer") == 1
+plain = "https://x.example/careers?location=India"
+assert scrape.keyword_template(plain) == plain
+wd = "https://nv.wd5.myworkdayjobs.com/Site?q=x"
+assert scrape.default_url_base(wd) == "https://nv.wd5.myworkdayjobs.com/Site"
+assert scrape.default_url_base(plain) is None
+assert scrape.build_url("https://a/b", page_url="https://p/q", url_base=None) == "https://a/b"
+assert scrape.build_url("/job/x", page_url="https://p/q", url_base="https://h/Site") == "https://h/Site/job/x"
+assert scrape.build_url("/job/x", page_url="https://p/q/r", url_base=None) == "https://p/job/x"
+
+# JSON mapping: a Workday-shaped payload is found and mapped; a facet list is not jobs.
+WORKDAY = {
+    "total": 3,
+    "facets": [{"id": "IN", "name": "India", "count": 9}] * 3,
+    "jobPostings": [
+        {"title": "Senior Software Engineer, Platform", "externalPath": "/job/Pune/Sr-SWE_R1",
+         "locationsText": "Pune, India", "postedOn": "Posted 3 Days Ago"},
+        {"title": "Machine Learning Engineer II", "externalPath": "/job/Bengaluru/MLE_R2",
+         "locationsText": "2 Locations", "postedOn": "Posted Today"},
+        {"title": "Site Reliability Engineer", "externalPath": "/job/Hyderabad/SRE_R3",
+         "locationsText": "Hyderabad, India", "postedOn": "Posted 30+ Days Ago"},
+    ],
+}
+page_two = {"jobPostings": [
+    {"title": "Data Platform Engineer", "externalPath": "/job/Pune/DPE_R4",
+     "locationsText": "Pune, India", "postedOn": "Posted Yesterday"},
+]}
+captured = [
+    ("https://nv.wd5.myworkdayjobs.com/wday/cxs/nv/Site/jobs?offset=0", WORKDAY),
+    ("https://nv.wd5.myworkdayjobs.com/wday/cxs/nv/Site/jobs?offset=20", page_two),
+]
+base = "https://nv.wd5.myworkdayjobs.com/Site"
+found = scrape.find_source(captured, None, None, page_url=base, url_base=base)
+assert found, "a job list in a captured response must be found"
+endpoint, fmap, rows = found
+assert endpoint == "nv.wd5.myworkdayjobs.com/wday/cxs/nv/Site/jobs", endpoint
+assert fmap["path"] == "jobPostings" and fmap["title"] == "title" and fmap["url"] == "externalPath", fmap
+assert len(rows) == 4, "both pages of the same endpoint merge"
+assert rows[0]["url"] == "https://nv.wd5.myworkdayjobs.com/Site/job/Pune/Sr-SWE_R1", rows[0]
+assert scrape.guess_field_map(WORKDAY["facets"], "facets") is None, "facets are not roles"
+replay = scrape.find_source(captured, endpoint, fmap, page_url=base, url_base=base)
+assert replay and len(replay[2]) == 4, "the saved mapping replays"
+assert scrape.find_source([("https://x/y", {"a": [1, 2, 3]})], None, None, page_url=base, url_base=None) is None
+# Workday reports its total on page one only (later pages say 0): the largest figure wins.
+assert scrape.source_total(captured, endpoint, fmap) == 3, "the fixture's own total"
+with_total = [(captured[0][0], {**WORKDAY, "total": 244}), (captured[1][0], {**page_two, "total": 0})]
+assert scrape.source_total(with_total, endpoint, fmap) == 244
+assert [r["url"] for r in scrape.merge_rows(rows[:2], rows[1:])] == [r["url"] for r in rows]
+
+asof = _dt.date(2026, 10, 5)
+assert scrape.normalize_posted("Posted 3 Days Ago", asof) == "2026-10-02"
+assert scrape.normalize_posted("Posted Today", asof) == "2026-10-05"
+assert scrape.normalize_posted("Posted Yesterday", asof) == "2026-10-04"
+assert scrape.normalize_posted("2026-09-01T10:00:00Z", asof) == "2026-09-01"
+assert scrape.normalize_posted("whenever", asof) is None
+
+# Anchors: job-shaped href and title-shaped text only; location rides in the text.
+anchors = [
+    {"href": "https://c.example/jobs/12345", "text": "Backend Engineer\nBengaluru, India\nFull time"},
+    {"href": "https://c.example/jobs/12345#apply", "text": "Backend Engineer"},
+    {"href": "https://c.example/careers", "text": "Careers"},
+    {"href": "https://c.example/about", "text": "About our engineering culture"},
+    {"href": "https://c.example/job/777", "text": "Apply now"},
+    {"href": "/jobs/99", "text": "Platform Engineer"},
+]
+links_found = scrape.job_links(anchors, "https://c.example/search")
+assert [r["title"] for r in links_found] == ["Backend Engineer", "Platform Engineer"], links_found
+# Lines two and three both ride along as the location hint: the city is not always second.
+assert links_found[0]["location"] == "Bengaluru, India, Full time", links_found[0]
+assert links_found[1]["url"] == "https://c.example/jobs/99" and links_found[1]["location"] == ""
+
+# Clusters: a repeated id-bearing link shape is a listing; a block of team pages is not.
+teams = ["alpha", "beta", "gamma", "delta", "omega", "sigma"]
+listing = [
+    {"href": f"https://jobs.x.example/en-in/details/2000{i}-08{i}/software-engineer-{n}?team=T",
+     "text": f"Software Engineer {n}\nBengaluru"}
+    for i, n in enumerate(teams)
+] + [
+    {"href": "https://jobs.x.example/en-in/search?location=india", "text": "Search roles here"},
+] + [
+    {"href": f"https://www.x.example/teams/software-engineering-{n}", "text": f"Software engineering team {n}"}
+    for n in teams
+]
+clustered = scrape.job_links(listing, "https://jobs.x.example/")
+assert len(clustered) == 6 and all("/details/" in r["url"] for r in clustered), clustered
+assert scrape.cluster_links(listing[7:], "https://x") == [], "team pages carry no ids, so they are not roles"
+
+# An API that exposes only an id: a person supplies the URL pattern once.
+ID_ONLY = {"items": [{"roleId": f"R{n}", "jobTitle": f"Platform Engineer {n}", "locations": [{"city": "Pune"}]}
+                     for n in range(4)]}
+assert scrape.guess_field_map(ID_ONLY["items"], "items") is None, "no link and no template -> not mappable"
+templated = {"path": "items", "title": "jobTitle", "id": "roleId", "location": "locations",
+             "url_template": "https://h.example/roles/{id}"}
+id_rows = scrape.rows_from_source([("https://api.h.example/q", ID_ONLY)], "api.h.example/q", templated,
+                                  page_url="https://h.example", url_base=None)
+assert [r["url"] for r in id_rows][:2] == ["https://h.example/roles/R0", "https://h.example/roles/R1"]
+assert id_rows[0]["location"] == "Pune"
+assert scrape.classify_page(202, "  ") and scrape.classify_page(202, "content") is None
+# A page that says its list is empty is a real zero, not an unreadable page.
+assert scrape.says_no_openings("Open positions\nThere are no job openings currently.")
+assert scrape.says_no_openings("We have no open positions right now")
+assert scrape.says_no_openings("Currently there are no job postings available."), "Nykaa's wording"
+assert scrape.says_no_openings("0 Open jobs available"), "Darwinbox's empty board"
+assert not scrape.says_no_openings("10 Open jobs available")
+assert scrape.says_no_openings("0\nOpen jobs available"), "the count renders in its own element"
+
+# Darwinbox: a job list with no link field, recognised by its endpoint.
+dbx_url = "https://acme.darwinbox.in/ms/candidateapi/job/alljobs?companyId=main"
+dbx = {"status": 1, "job_counts": 3, "data": [
+    {"id": f"a6ab{i}", "title": t, "locations": "Bangalore, Karnataka, India", "posted_on": 1790620200}
+    for i, t in enumerate(["SDE-3 (Backend)", "Staff Engineer", "Customer Success Engineer"])
+]}
+assert scrape.guess_field_map(dbx["data"], "data") is None, "no link field: the generic guess must not fire"
+dbx_found = scrape.find_source([(dbx_url, dbx)], None, None, page_url=dbx_url, url_base=None)
+assert dbx_found, "Darwinbox alljobs should be read by its known shape"
+dbx_rows = dbx_found[2]
+assert dbx_rows[0]["url"] == "https://acme.darwinbox.in/ms/candidatev2/main/careers/jobDetails/a6ab0", dbx_rows[0]
+assert dbx_rows[0]["location"] == "Bangalore, Karnataka, India"
+assert scrape.source_total([(dbx_url, dbx)], dbx_found[0], dbx_found[1]) == 3, "job_counts is the total"
+assert scrape.known_field_map("https://acme.example/ms/candidateapi/job/alljobs", "data") is None
+assert scrape.normalize_posted(1790620200) == "2026-09-28", "epoch seconds, not 1970"
+assert scrape.normalize_posted(1790620200000) == "2026-09-28", "epoch milliseconds still work"
+
+# Kula: JSON with no link field and the location nested two levels down.
+kula_url = "https://careers.kula.ai/api/internal/ats_job_posts?accountName=plumhq&page=1&items=99"
+kula = {"meta": {"count": 3, "pages": 1}, "data": [
+    {"id": 3920 + i, "title": t, "launch_at": "2026-06-30T11:57:45.000Z",
+     "ats_job": {"offices": [{"name": "Plum, 6th Floor, Whitefield", "location": "Bengaluru, Karnataka, India"}]}}
+    for i, t in enumerate(["SDET", "Backend Engineer", "Senior Software Engineer"])
+]}
+kula_found = scrape.find_source([(kula_url, kula)], None, None, page_url=kula_url, url_base=None)
+assert kula_found, "Kula ats_job_posts should be read by its known shape"
+assert kula_found[2][0]["url"] == "https://careers.kula.ai/plumhq/3920", kula_found[2][0]
+assert kula_found[2][0]["location"] == "Bengaluru, Karnataka, India", "the office's location, not its street address"
+assert scrape.source_total([(kula_url, kula)], kula_found[0], kula_found[1]) == 3, "meta.count is the total"
+pj_url = "https://api.pyjamahr.com/api/career/jobs/?company_uuid=8B92017E1E&page=1&is_careers_page=true"
+pj = {"count": 64, "next": None, "results": [
+    {"id": 413349 + i, "slug": "x", "title": t, "location": "Bengaluru"}
+    for i, t in enumerate(["Backend Engineer", "Data Engineer", "Android Developer"])
+]}
+pj_found = scrape.find_source([(pj_url, pj)], None, None, page_url=pj_url, url_base=None)
+assert pj_found and pj_found[2][0]["url"] == (
+    "https://app.pyjamahr.com/careers?company_uuid=8B92017E1E&job_id=413349"
+), pj_found
+assert scrape.source_total([(pj_url, pj)], pj_found[0], pj_found[1]) == 64, "under-coverage stays visible"
+pj_slug_url = "https://api.pyjamahr.com/api/career/jobs/?company_slug=dodo-payments&page=1"
+pj_slug = {"count": 3, "results": [dict(r, slug=f"backend-engineer-{i}") for i, r in enumerate(pj["results"])]}
+pj_slug_found = scrape.find_source([(pj_slug_url, pj_slug)], None, None, page_url=pj_slug_url, url_base=None)
+assert pj_slug_found[2][0]["url"] == "https://jobs.pyjamahr.com/dodo-payments/backend-engineer-0", pj_slug_found[2][0]
+# MyNextHire: the posting URL carries the id inside base64 JSON. This exact URL
+# was checked by hand to open Amagi's req 436 rather than the list.
+mnh_url = "https://amagi.mynexthire.com/employer/careers/reqlist/get"
+mnh = {"requesterTitle": "", "reqDetailsBOList": [
+    {"reqId": 436 + i, "reqTitle": t, "location": "Bangalore", "approvedOn": "2026-09-16T15:41:52.395+0000"}
+    for i, t in enumerate(["Technical Project Lead", "Software Development Engineer III", "Platform Engineer"])
+]}
+mnh_found = scrape.find_source([(mnh_url, mnh)], None, None, page_url=mnh_url, url_base=None)
+assert mnh_found[2][0]["url"] == (
+    "https://amagi.mynexthire.com/employer/jobs/careers#?src=careers&p="
+    "eyJwYWdlVHlwZSI6ImpkIiwiY3ZTb3VyY2UiOiJjYXJlZXJzIiwicmVxSWQiOjQzNiwicmVxdWVzdGVyIjp7ImlkIjoiIiwiY29kZSI6IiIsIm5hbWUiOiIifSwicGFnZSI6ImNhcmVlcnMiLCJidWZpbHRlciI6LTEsImN1c3RvbUZpZWxkcyI6e319"
+    "&page=careers"
+), mnh_found[2][0]["url"]
+# Dedupe keeps postings that differ only in the query or fragment.
+pj_roles = [scrape.to_role({"name": "Kuku FM", "id": "k"}, "xhr", r) for r in pj_found[2]]
+pj_roles.append(dict(pj_roles[0], url=pj_roles[0]["url"] + "&utm_source=x"))
+kept, _ = scrape.dedupe_scraped(pj_roles, [])
+assert len(kept) == 3, f"three job_ids are three roles, and a utm_ copy is not a fourth: {len(kept)}"
+mnh_roles = [scrape.to_role({"name": "Amagi", "id": "a"}, "xhr", r) for r in mnh_found[2]]
+assert len(scrape.dedupe_scraped(mnh_roles, [])[0]) == 3, "fragment-identified postings stay distinct"
+wk_url = "https://apply.workable.com/api/v3/accounts/tiger-analytics/jobs"
+wk = {"total": 3, "results": [
+    {"shortcode": f"39D0D71D6{i}", "title": t, "published": "2026-09-01T00:00:00.000Z",
+     "location": {"country": "India", "city": "Bengaluru", "region": "Karnataka"}}
+    for i, t in enumerate(["Data Engineer", "ML Engineer", "Software Engineer"])
+]}
+wk_found = scrape.find_source([(wk_url, wk)], None, None, page_url=wk_url, url_base=None)
+assert wk_found[2][0]["url"] == "https://apply.workable.com/tiger-analytics/j/39D0D71D60/", wk_found[2][0]
+assert scrape.find_source(
+    [("https://apply.workable.com/api/v3/accounts/tiger-analytics/jobs/filters", wk)], None, None,
+    page_url=wk_url, url_base=None,
+) is None, "the filters endpoint is not the job list"
+wk_india = {"total": 4, "results": wk["results"][:1]}
+assert scrape.source_total([(wk_url, {"total": 161, "results": wk["results"]}), (wk_url, wk_india)],
+                           wk_found[0], wk_found[1]) == 4, "the refined list's total, not the unfiltered one"
+assert not scrape.says_no_openings("Open positions: Backend Engineer, 14 openings in Pune")
+
+# Entry links: a brochure careers page is followed to its list; social links never are.
+brochure = [
+    {"href": "https://www.linkedin.com/company/acme", "text": "Join us on LinkedIn"},
+    {"href": "https://acme.example/about", "text": "About us"},
+    {"href": "https://acme.example/careers/life", "text": "Life at Acme"},
+    {"href": "https://acme.example/careers/openings", "text": "View open roles"},
+]
+assert scrape.pick_entry_link(brochure, [], "https://acme.example/careers") == "https://acme.example/careers/openings"
+on_ats = brochure + [{"href": "https://acme.wd3.myworkdayjobs.com/External", "text": "Apply"}]
+assert scrape.pick_entry_link(on_ats, [], "https://acme.example/careers") == "https://acme.wd3.myworkdayjobs.com/External"
+embedded = ["https://boards.greenhouse.io/embed/job_board?for=acme"]
+assert scrape.pick_entry_link(brochure, embedded, "https://acme.example/careers") == embedded[0], "an embedded board is the list"
+assert scrape.pick_entry_link(brochure[:3], [], "https://acme.example/careers") is None
+assert scrape.pick_entry_link(
+    [{"href": "https://acme.example/go/Demand/95/", "text": "Explore Job Opportunities"}], [], "https://acme.example/"
+) == "https://acme.example/go/Demand/95/", "HCLTech's wording"
+assert scrape.pick_entry_link([{"href": "https://acme.example/careers", "text": "Careers"}], [], "https://acme.example/") == "https://acme.example/careers"
+assert scrape.site_root("https://acme.example/a/b?c=1") == "https://acme.example/"
+assert scrape.listing_url_for("https://g24.darwinbox.in/ms/candidate/main/candidate/login") == \
+    "https://g24.darwinbox.in/ms/candidatev2/main/careers/allJobs"
+assert scrape.listing_url_for("https://apply.workable.com/tiger-analytics/j/23D676B06C/") == \
+    "https://apply.workable.com/tiger-analytics/"
+assert scrape.listing_url_for("https://acme.example/careers") == "https://acme.example/careers"
+
+# Plausibility: case studies and a repeated nav item are not job lists.
+def _titles(*ts):
+    return [{"title": t} for t in ts]
+assert scrape.looks_like_jobs(_titles("Senior Category Manager", "Backend Engineer", "GTM recruiter"))
+assert not scrape.looks_like_jobs(_titles(
+    "Hapi Cloud hit an 85% utilization rate", "Fluxx boosted customer engagement",
+    "Gamify slashed implementation timelines"))
+assert not scrape.looks_like_jobs(_titles("Application", "Application", "Application"))
+assert not scrape.looks_like_jobs([])
+
+# Walls are reported, never bypassed.
+assert scrape.classify_page(403, "") == "HTTP 403"
+assert scrape.classify_page(200, "Please verify you are human to continue")
+assert scrape.classify_page(200, "Open roles: Backend Engineer") is None
+assert scrape.classify_exception(RuntimeError("Page.goto: net::ERR_NAME_NOT_RESOLVED")) == "navigation"
+
+# Filtering: a role with no readable location is trusted to the URL's own filter.
+filt = {
+    "keywords": ["engineer"], "locations": list(discover.INDIA_TOKENS),
+    "exclude_keywords": list(discover.NOISE_KEYWORDS), "include_remote": False, "max_age_days": None,
+}
+co = {"id": "c1", "name": "Globex", "category": "product", "tier": "tier1", "careers_url": "https://g.example/jobs"}
+mixed = [
+    scrape.to_role(co, "links", {"title": "Backend Engineer", "url": "https://g.example/jobs/1", "location": ""}),
+    scrape.to_role(co, "xhr", {"title": "SRE", "url": "https://g.example/jobs/2", "location": "Pune, India"}),
+    scrape.to_role(co, "xhr", {"title": "Platform Engineer", "url": "https://g.example/jobs/3", "location": "Austin, US"}),
+    scrape.to_role(co, "xhr", {"title": "Sales Engineer", "url": "https://g.example/jobs/4", "location": "Pune, India"}),
+]
+kept_titles = sorted(r["title"] for r in scrape.filter_scraped(mixed, {**filt, "keywords": ["engineer", "sre"]}))
+assert kept_titles == ["Backend Engineer", "SRE"], kept_titles
+
+# Assembly: tier order, dedupe against jobs.json, new-since-last-run, links and failures.
+co2 = {"id": "c2", "name": "Initech", "category": "mnc", "tier": "faang", "careers_url": "https://i.example/c"}
+co3 = {"id": "c3", "name": "Hooli", "category": "mnc", "tier": "tier2", "careers_url": "https://h.example/c"}
+co4 = {"id": "c4", "name": "LinkedIn", "category": "mnc", "tier": "tier1", "careers_url": "https://www.linkedin.com/jobs"}
+assert scrape.skip_reason(co4, None), "linkedin is skipped outright"
+results = [
+    {"company": co, "strategy": "links", "rows": [
+        {"title": "Backend Engineer", "url": "https://g.example/jobs/1", "location": ""},
+        {"title": "Platform Engineer", "url": "https://g.example/jobs/3", "location": "Austin, US"}],
+     "problem": None, "detail": "", "search_url": "https://g.example/jobs?q=software+engineer", "snapshot": None},
+    {"company": co2, "strategy": "xhr", "rows": [
+        {"title": "Software Engineer", "url": "https://i.example/c/9", "location": "Bengaluru, India"}],
+     "problem": None, "detail": "", "search_url": "https://i.example/c?location=India", "snapshot": None},
+    {"company": co3, "strategy": None, "rows": [], "problem": "blocked", "detail": "HTTP 403",
+     "search_url": "https://h.example/c", "snapshot": "data/scrape-snapshots/x/hooli"},
+    {"company": co4, "strategy": None, "rows": [], "problem": "skipped",
+     "detail": "login wall and terms of service", "search_url": "https://www.linkedin.com/jobs", "snapshot": None},
+]
+built = scrape.assemble(results, filt, [], {"https://i.example/c/9"})
+assert [r["company"] for r in built["roles"]] == ["Initech", "Globex"], "faang sorts before tier1"
+assert [r["is_new"] for r in built["roles"]] == [False, True], "an earlier export's link is not new"
+assert built["totals"]["ok"] == 2 and built["totals"]["failed"] == 1 and built["totals"]["skipped"] == 1
+assert [f["company"] for f in built["failures"]] == ["Hooli"], "a skip is not a failure"
+assert {a["company"] for a in built["attention"]} == {"Hooli", "LinkedIn"}, "the sheet names every unread company"
+assert len(built["links"]) == 4, "every company still gets its filtered link"
+assert any(l["status"] == "ok" and l["found"] == 1 for l in built["links"] if l["company"] == "Initech")
+tracked_url = [{"url": "https://i.example/c/9", "organisation": "", "job_title": ""}]
+assert scrape.assemble(results, filt, tracked_url, set())["totals"]["already_tracked"] == 1
+# Same title, different link: both are real openings. A title match only counts for a
+# tracked record that has no URL of its own.
+twins = [
+    {"company": co, "strategy": "xhr", "problem": None, "detail": "", "snapshot": None,
+     "search_url": "https://g.example/jobs",
+     "rows": [{"title": "Software Engineer", "url": f"https://g.example/jobs/{n}", "location": "Pune, India"}
+              for n in (1, 2, 3)]},
+]
+assert len(scrape.assemble(twins, filt, [], set())["roles"]) == 3, "same-title postings are distinct roles"
+by_hand = [{"url": None, "organisation": "Globex", "job_title": "software engineer"}]
+assert scrape.assemble(twins, filt, by_hand, set())["totals"]["already_tracked"] == 3
+with_url = [{"url": "https://elsewhere/1", "organisation": "Globex", "job_title": "Software Engineer"}]
+assert scrape.assemble(twins, filt, with_url, set())["totals"]["already_tracked"] == 0
+
+# Config merge: a failure keeps the working config; layout_changed keeps last_count.
+saved = {"company_id": "c3", "name": "Hooli", "strategy": "xhr", "last_count": 40, "endpoint": "e"}
+bad = scrape.merge_site(saved, co3, results[2], "https://h.example/c")
+assert bad["strategy"] == "xhr" and bad["endpoint"] == "e" and bad["last_error"].startswith("blocked")
+shrunk = {"company": co3, "strategy": "xhr", "rows": [1], "learned": {}, "problem": "layout_changed", "detail": "1 vs 40"}
+assert scrape.merge_site(saved, co3, shrunk, "u")["last_count"] == 40
+healed = {"company": co3, "strategy": "links", "rows": [1, 2, 3], "learned": {}, "problem": None, "detail": ""}
+assert scrape.merge_site(saved, co3, healed, "u")["last_count"] == 3
+under = {"company": co3, "strategy": "xhr", "rows": [1, 2], "learned": {"endpoint": "e2"},
+         "problem": "partial", "detail": "read 2 of 244 roles"}
+merged_under = scrape.merge_site(saved, co3, under, "u")
+assert merged_under["last_count"] == 2 and merged_under["endpoint"] == "e2"
+assert merged_under["last_error"].startswith("partial"), "a partial read keeps its config but says so"
+
+# Selection: only companies with no JSON board and a link; flags narrow it.
+board_rows = [
+    {**co, "ats_provider": "none", "status": "researching"},
+    {**co2, "ats_provider": "none", "status": "target"},
+    {**co3, "ats_provider": "greenhouse", "status": "researching"},
+    {"id": "c5", "name": "Dead", "tier": "tier1", "ats_provider": "none", "status": "researching", "careers_url": None},
+    {"id": "c6", "name": "Meh", "tier": "tier1", "ats_provider": "none", "status": "not_interested",
+     "careers_url": "https://m.example"},
+]
+assert {c["name"] for c in scrape.select(board_rows, tiers=[], statuses=[], names=[])} == {"Globex", "Initech"}
+assert [c["name"] for c in scrape.select(board_rows, tiers=["tier1"], statuses=["target"], names=[])] == ["Globex", "Initech"]
+assert [c["name"] for c in scrape.select(board_rows, tiers=[], statuses=[], names=["meh"])] == ["Meh"]
+
+# A followed entry link becomes the site's search_url.
+hopped = {"company": co3, "strategy": "links", "rows": [1], "problem": None, "detail": "",
+          "learned": {"search_url": "https://h.example/careers/openings"}}
+assert scrape.merge_site(saved, co3, hopped, "https://h.example/c")["search_url"] == "https://h.example/careers/openings"
+
+# Manual review: a history per company, latest wins; the queue offers readable sites first.
+reviewed_site = scrape.record_review(None, co, "needs_fix", "missed the Pune roles", on="2026-10-05")
+reviewed_site = scrape.record_review(reviewed_site, co, "verified", on="2026-10-06")
+assert len(reviewed_site["reviews"]) == 2 and scrape.review_label(reviewed_site) == "verified 2026-10-06"
+try:
+    scrape.record_review(None, co, "looks fine")
+    raise AssertionError("an unknown verdict must be rejected")
+except ValueError:
+    pass
+pool_rows = [
+    {**co, "tier": "tier2"},                      # reviewed
+    {**co2, "tier": "faang"},                     # pending, readable
+    {**co4, "tier": "tier1"},                     # pending, but LinkedIn is skipped
+    {"id": "c7", "name": "Umbrella", "tier": "tier1", "careers_url": "https://u.example/jobs"},
+]
+queue_sites = {"c1": reviewed_site}
+assert [c["name"] for c in scrape.review_queue(pool_rows, queue_sites)] == ["Initech", "Umbrella"]
+assert [c["name"] for c in scrape.review_queue(pool_rows, queue_sites, limit=5)][-1] == "LinkedIn"
+
+# Needs-your-help: a reason is required, and the list reads it back by tier.
+try:
+    scrape.flag_help(None, co, "  ")
+    raise AssertionError("a help flag without a reason must be rejected")
+except ValueError:
+    pass
+queue_sites["c7"] = scrape.flag_help(None, pool_rows[3], "404, needs a new careers link", on="2026-10-05")
+assert [(h["company"], h["why"]) for h in scrape.help_rows(pool_rows, queue_sites)] == [
+    ("Umbrella", "404, needs a new careers link")]
+assert scrape.selection_slug(["tier1", "faang"], ["target"], []) == "faang-tier1-target"
+assert scrape.selection_slug([], [], ["D. E. Shaw India"]) == "d-e-shaw-india"
+
+# Filters file: created on first use, null expands to the India list, flags override.
+loaded = scrape.load_filters({"keywords": ["rust"], "include_remote": True})
+assert (jsonstore.DATA_DIR / scrape.FILTERS_FILE).exists()
+assert loaded["keywords"] == ["rust"] and loaded["include_remote"] is True
+assert "bengaluru" in loaded["locations"] and loaded["exclude_keywords"] == list(discover.NOISE_KEYWORDS)
+assert scrape.load_filters()["keywords"] == scrape.DEFAULT_FILTERS["keywords"], "overrides are per-run"
+
+# Workbook: four sheets, real hyperlinks, scraped text pinned to strings, new-since diff.
+from openpyxl import load_workbook  # noqa: E402
+
+xl_dir = Path(tmp) / "exports"
+hostile = {**built["roles"][0], "title": "=HYPERLINK(\"http://evil\",\"x\")"}
+xl = roles_xlsx.write(
+    xl_dir / "open-roles-2026-10-04.xlsx", [hostile, *built["roles"][1:]],
+    [{**built["links"][0], "reviewed": "verified 2026-10-04"}, *built["links"][1:]],
+    built["failures"], [("Run date", "2026-10-04")],
+    scrape.help_rows(pool_rows, queue_sites),
+)
+wb = load_workbook(xl)
+assert wb.sheetnames == [roles_xlsx.ROLES_SHEET, roles_xlsx.LINKS_SHEET, roles_xlsx.FAILURES_SHEET,
+                         roles_xlsx.HELP_SHEET, roles_xlsx.SUMMARY_SHEET]
+assert wb[roles_xlsx.HELP_SHEET]["A2"].value == "Umbrella" and wb[roles_xlsx.HELP_SHEET]["C2"].hyperlink
+assert wb[roles_xlsx.LINKS_SHEET]["F2"].value == "verified 2026-10-04"
+# A partial run is compared only with earlier runs of the same selection.
+roles_xlsx.write(xl_dir / "open-roles-2026-10-03-faang.xlsx", [], [], [], [])
+assert roles_xlsx.latest_before(xl_dir, xl_dir / "open-roles-2026-10-05-faang.xlsx").name == "open-roles-2026-10-03-faang.xlsx"
+assert roles_xlsx.latest_before(xl_dir, xl_dir / "open-roles-2026-10-05.xlsx") == xl
+cell = wb[roles_xlsx.ROLES_SHEET]["C2"]
+assert cell.data_type == "s" and cell.value.startswith("="), "a scraped '=...' title must not become a formula"
+assert wb[roles_xlsx.ROLES_SHEET]["G2"].hyperlink.target == built["roles"][0]["url"]
+assert wb[roles_xlsx.ROLES_SHEET].freeze_panes == "A2"
+assert wb[roles_xlsx.FAILURES_SHEET]["A2"].value == "Hooli"
+assert roles_xlsx.read_previous_urls(xl) == {r["url"] for r in built["roles"]}
+assert roles_xlsx.latest_before(xl_dir, xl_dir / "open-roles-2026-10-05.xlsx") == xl
+assert roles_xlsx.latest_before(xl_dir, xl) is None
+assert roles_xlsx.read_previous_urls(xl_dir / "missing.xlsx") == set()
+print(f"scrape OK   {len(built['roles'])} roles assembled, {len(rows)} mapped from a workday-shaped payload")
+
 # ------------------------------------------------------------------ prompt
 import ai  # noqa: E402
 
@@ -951,10 +1366,24 @@ names = {tool.name for tool in ai.TOOLS}
 import re  # noqa: E402
 
 for candidate in set(
-    re.findall(r"\b(?:add|get|list|log|update|save|link|set|flag|resolve)_[a-z_]+\b", prompt)
+    re.findall(r"\b(?:add|get|list|log|update|save|link|set|flag|resolve|cap)_[a-z_]+\b", prompt)
 ):
     assert candidate in names, f"prompt references a missing tool: {candidate}"
 assert ai.build_options(None).system_prompt == prompt
+# The prompt is a plain literal, so the cap it states can drift from the constant.
+assert f"gets {dsa.ATTEMPT_CAP_MINUTES} minutes on the clock" in prompt, "prompt and cap disagree"
+
+# The cap is enforced by the server putting the clock in front of the turn, not
+# by the model remembering to look.
+assert ai.with_clock_note("hello") == "hello"
+overrun = dsa.create_problem({"title": "Overrun"})
+dsa.set_timer(overrun["id"], "start")
+_rewind(overrun["id"], (dsa.ATTEMPT_CAP_MINUTES + 1) * 60)
+noted = ai.with_clock_note("one more minute")
+assert noted.startswith("[stopwatch] Overrun is at 41 min"), noted
+assert overrun["id"] in noted and noted.endswith("\n\none more minute"), noted
+dsa.cap_attempt(overrun["id"])
+assert ai.clock_note() == ""
 print(f"prompt OK   {len(names)} tools, {len(prompt)} chars")
 
 # The Windows loop bridge: uvicorn --reload hands us a SelectorEventLoop, which
