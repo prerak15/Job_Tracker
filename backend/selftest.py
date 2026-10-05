@@ -1150,6 +1150,80 @@ assert scrape.find_source(
 wk_india = {"total": 4, "results": wk["results"][:1]}
 assert scrape.source_total([(wk_url, {"total": 161, "results": wk["results"]}), (wk_url, wk_india)],
                            wk_found[0], wk_found[1]) == 4, "the refined list's total, not the unfiltered one"
+
+# Experience: read from a board's field, a title, or near "experience" in a JD.
+pe = discover.parse_experience
+assert pe("2 - 5 Years", structured=True) == (2, 5)
+assert pe("3+ yrs", structured=True) == (3, None)
+assert pe("Fresher", structured=True) == (0, 0)
+assert pe("We need 3+ years of experience building backend services") == (3, None)
+assert pe("Experience: 1–3 years in Python") == (1, 3)
+assert pe("Minimum of 5 years of professional experience") == (5, None)
+assert pe("Founded 12 years ago, we serve 40 countries.") is None, "a company's age is not a requirement"
+assert pe("SDE 2 (Backend)") is None, "SDE 2 is a level, not years"
+fits = discover.experience_fits
+assert fits({"exp_min": 2, "exp_max": 5}, (0, 3)), "overlap: 2-5 is open to someone with 2"
+assert fits({"exp_min": 3, "exp_max": None}, (0, 3)), "a 3+ bar is reachable from 0-3"
+assert not fits({"exp_min": 6, "exp_max": 9}, (0, 3))
+assert not fits({"exp_min": 5, "exp_max": None}, (0, 3))
+assert fits({"exp_min": None, "exp_max": None}, (0, 3)), "unstated is kept by default"
+assert not fits({"exp_min": None, "exp_max": None}, (0, 3), required=True)
+jd_role = discover._role({"name": "Acme"}, "lever", title="Software Engineer", url="u",
+                         locations=["Bengaluru"], posted=None,
+                         description="About us... Requirements: 6+ years of experience with Go.")
+assert (jd_role["exp_min"], jd_role["exp_max"], jd_role["experience"]) == (6, None, "6+ yrs"), jd_role
+assert not discover.filter_roles([jd_role], keywords=["software"], experience=(0, 3))
+# Board fields: Darwinbox's experience_from/to come through the known map.
+assert dbx_found[1]["exp_min"] == "experience_from"
+dbx_exp = dict(dbx["data"][0], experience_from="6", experience_to="9")
+assert scrape.row_experience(dbx_exp, dbx_found[1]) == (6, 9)
+assert scrape.row_experience({"minExperience": 3, "maxExperience": 0}, {"exp_min": "minExperience", "exp_max": "maxExperience"}) == (3, None), "a max of 0 under a min of 3 is unset"
+assert scrape.guess_experience_keys([{"min_experience": 1, "max_experience": 3}] * 3) == {"exp_min": "min_experience", "exp_max": "max_experience"}
+assert scrape.card_experience(["Bangalore, Karnataka, India", "6 - 9 Years", "Full Time"]) == (6, 9)
+assert scrape.experience_range("0-3") == {"min": 0, "max": 3, "required": False}
+f = scrape.load_filters({"experience": "0-3"})
+senior = scrape.to_role({"name": "Locus", "id": "l"}, "links", {"title": "Staff Engineer", "url": "https://x/1", "location": "Bangalore", "experience": (8, 12)})
+young = scrape.to_role({"name": "Locus", "id": "l"}, "links", {"title": "Software Engineer", "url": "https://x/2", "location": "Bangalore", "experience": (1, 3)})
+assert [r["title"] for r in scrape.filter_scraped([senior, young], f)] == ["Software Engineer"]
+
+# The per-company snapshot behind the Open roles tab.
+acme = {"id": "c-acme", "name": "Acme", "tier": "growth", "category": "startup"}
+ok_run = {"company": acme, "problem": None, "detail": "", "strategy": "links",
+          "rows": [{"title": "Backend Engineer", "url": "https://acme.example/jobs/1", "location": "Bengaluru"}]}
+snap = scrape.merge_scraped({}, [ok_run], as_of="2026-10-05")
+assert snap["c-acme"]["read_on"] == "2026-10-05" and len(snap["c-acme"]["roles"]) == 1
+assert "description" not in snap["c-acme"]["roles"][0], "the snapshot carries no JD text"
+failed = {**ok_run, "problem": "timeout", "detail": "no result", "rows": []}
+snap2 = scrape.merge_scraped(snap, [failed], as_of="2026-10-06")
+assert snap2["c-acme"]["roles"] and snap2["c-acme"]["read_on"] == "2026-10-05", "a failed read keeps yesterday's roles"
+assert snap2["c-acme"]["problem"].startswith("timeout")
+empty = {**ok_run, "rows": [], "detail": "the page says there are no openings"}
+assert scrape.merge_scraped(snap, [empty], as_of="2026-10-06")["c-acme"]["roles"] == [], "a real zero clears them"
+scrape.save_scraped(snap)
+assert scrape.load_scraped()["c-acme"]["name"] == "Acme"
+
+import openroles
+
+saved = openroles.save_filters({"experience": {"min": 0, "max": 2}, "exclude_seniority": ["senior"]})
+assert saved["experience"] == {"min": 0, "max": 2, "required": False} and saved["exclude_seniority"] == ["senior"]
+off = openroles.save_filters({"experience": None})
+assert off["experience"] is None, "switching the filter off must not fall back to the 0-3 default"
+for bad in ({"experience": "lots"}, {"exclude_seniority": ["wizard"]}, {"keywords": []}, {"locations": ["x"]}):
+    try:
+        openroles.save_filters(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"save_filters accepted {bad}")
+openroles.save_filters({"experience": "0-3", "exclude_seniority": ["senior", "intern"]})
+on_board = {c["name"] for c in companies.list_companies()}
+sugg = openroles.suggestions()
+assert sugg and not any(x["name"] in on_board for x in sugg), "suggestions never repeat the board"
+first = sugg[0]["name"]
+assert openroles.add_suggestions([first])["added"] == 1
+assert all(x["name"] != first for x in openroles.suggestions())
+assert openroles.scrape_status()["running"] is False
+print(f"open roles OK {len(sugg)} suggestions, filters round-trip, snapshot keeps a failed read's roles")
 assert not scrape.says_no_openings("Open positions: Backend Engineer, 14 openings in Pune")
 
 # Entry links: a brochure careers page is followed to its list; social links never are.
@@ -1341,7 +1415,7 @@ assert roles_xlsx.latest_before(xl_dir, xl_dir / "open-roles-2026-10-05-faang.xl
 assert roles_xlsx.latest_before(xl_dir, xl_dir / "open-roles-2026-10-05.xlsx") == xl
 cell = wb[roles_xlsx.ROLES_SHEET]["C2"]
 assert cell.data_type == "s" and cell.value.startswith("="), "a scraped '=...' title must not become a formula"
-assert wb[roles_xlsx.ROLES_SHEET]["G2"].hyperlink.target == built["roles"][0]["url"]
+assert wb[roles_xlsx.ROLES_SHEET]["H2"].hyperlink.target == built["roles"][0]["url"]
 assert wb[roles_xlsx.ROLES_SHEET].freeze_panes == "A2"
 assert wb[roles_xlsx.FAILURES_SHEET]["A2"].value == "Hooli"
 assert roles_xlsx.read_previous_urls(xl) == {r["url"] for r in built["roles"]}

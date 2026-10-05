@@ -20,6 +20,7 @@ async function request(path, options = {}) {
 const get = (p) => request(p)
 const post = (p, body) => request(p, { method: 'POST', body: JSON.stringify(body ?? {}) })
 const patch = (p, body) => request(p, { method: 'PATCH', body: JSON.stringify(body) })
+const put = (p, body) => request(p, { method: 'PUT', body: JSON.stringify(body) })
 const del = (p) => request(p, { method: 'DELETE' })
 
 export const api = {
@@ -119,6 +120,16 @@ export const api = {
     stats: () => get('/companies/stats'),
     targetGaps: () => get('/companies/target-gaps'),
     seed: () => post('/companies/seed'),
+    suggestions: () => get('/companies/suggestions'),
+    addSuggestions: (names) => post('/companies/suggestions', { names }),
+  },
+
+  // Open roles: job boards (live) + careers pages (last scrape), one filter file.
+  roles: {
+    list: (refresh = false) => get(`/roles${refresh ? '?refresh=true' : ''}`),
+    saveFilters: (body) => put('/roles/filters', body),
+    scrapeStatus: () => get('/roles/scrape'),
+    startScrape: (body) => post('/roles/scrape', body),
   },
 
   discover: {

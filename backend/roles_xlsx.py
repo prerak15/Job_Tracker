@@ -38,7 +38,8 @@ SUMMARY_SHEET = "Summary"
 
 ROLE_COLUMNS = (
     ("Company", 22), ("Tier", 9), ("Title", 52), ("Location", 28),
-    ("Posted", 12), ("Seniority", 11), ("Apply link", 60), ("Source", 9), ("New", 6),
+    ("Posted", 12), ("Seniority", 11), ("Experience", 11), ("Apply link", 60), ("Source", 9),
+    ("New", 6),
 )
 LINK_COLUMNS = (
     ("Company", 22), ("Tier", 9), ("Filtered results page", 80),
@@ -105,9 +106,10 @@ def write(
         _text(ws, row, 4, role.get("location"))
         _text(ws, row, 5, role.get("posted"))
         _text(ws, row, 6, role.get("seniority"))
-        _link(ws, row, 7, role.get("url"))
-        _text(ws, row, 8, role.get("strategy"))
-        _text(ws, row, 9, "new" if role.get("is_new") else "")
+        _text(ws, row, 7, role.get("experience"))
+        _link(ws, row, 8, role.get("url"))
+        _text(ws, row, 9, role.get("strategy"))
+        _text(ws, row, 10, "new" if role.get("is_new") else "")
     _finish(ws, ROLE_COLUMNS, len(roles))
 
     ws = wb.create_sheet(LINKS_SHEET)
@@ -181,9 +183,13 @@ def read_previous_urls(path: Path | None) -> set[str]:
     try:
         wb = load_workbook(path, read_only=True)
         ws = wb[ROLES_SHEET]
+        # Found by header, not position: the Experience column moved it from 7 to 8,
+        # and a workbook from before then must still count as "seen".
+        header = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+        column = list(header).index("Apply link") + 1 if "Apply link" in header else 7
         return {
             str(row[0]).strip()
-            for row in ws.iter_rows(min_row=2, min_col=7, max_col=7, values_only=True)
+            for row in ws.iter_rows(min_row=2, min_col=column, max_col=column, values_only=True)
             if row and row[0]
         }
     except Exception:  # a corrupt or half-open previous export must not stop a run

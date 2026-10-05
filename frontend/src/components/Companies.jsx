@@ -601,7 +601,7 @@ function CompanyRow({ company, meta, open, onToggle, reload }) {
   )
 }
 
-function CompanyForm({ meta, onSave }) {
+export function CompanyForm({ meta, onSave }) {
   const [form, setForm] = useState({
     name: '',
     category: 'product',

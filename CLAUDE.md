@@ -13,8 +13,9 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   jsonstore.py   atomic JSON read/write shared by every domain
   storage.py     job applications
   companies.py   the company board — who to target
-  company_seed.py curated India list, ~170 companies (data, not logic)
-  discover.py    role discovery from public ATS boards
+  company_seed.py curated India list (SEED, ~240) + CATALOGUE of suggestions (data, not logic)
+  discover.py    role discovery from public ATS boards; experience parsing + filter
+  openroles.py   the Open roles tab: both sources, one filter file, scrape runner, suggestions
   scrape.py      Playwright scraper for careers pages with no ATS board → Excel
   roles_xlsx.py  the scraper's workbook writer (openpyxl)
   resumes.py     resume versions + JD tailoring
@@ -28,10 +29,10 @@ backend/     FastAPI + the Claude Agent SDK chat agent
   ai.py          chat agent, ~70 in-process tools
   main.py        REST routes
   selftest.py    every domain, against a temp dir — no server needed
-frontend/    Vite + React dashboard (7 tabs + chat drawer)
+frontend/    Vite + React dashboard (8 tabs + chat drawer)
   src/cache.js   session cache — survives a browser refresh
   src/refresh.js the auto-refresh loop
-data/        the database — eight JSON files, GITIGNORED
+data/        the database — JSON files, GITIGNORED
 ```
 
 **Never commit anything under `data/`.** The repo is meant to be shareable; the
@@ -189,7 +190,24 @@ Rules, and why:
   `null` locations means the India list from `discover.py`). CLI flags override
   for one run. `primary_query` is empty by default on purpose: baking
   "software engineer" into a site's URL loses "Machine Learning Engineer", so the
-  site is read by location and the keywords filter client-side.
+  site is read by location and the keywords filter client-side. The same file
+  drives the dashboard's **Open roles** tab, which edits it, so the tab and the
+  workbook cannot disagree.
+- **Experience** (`"experience": {"min": 0, "max": 3, "required": false}`,
+  `--experience 0-3`, `--experience any`) matches by **overlap**: with 0-3 a
+  "2-5 years" posting stays and "6-9" goes; a "3+" bar stays. A posting that
+  states no figure is **kept** unless `required` — most careers pages never say,
+  and requiring it empties the list. Years come from the board's own field
+  first (Darwinbox `experience_from/to`, MyNextHire `expMin/expMax`, PyjamaHR
+  `min/max_experience`, a card's "2 - 5 Years" line), then the title, then the
+  JD — and in free text only within a short window of the word "experience",
+  so "founded 12 years ago" isn't read as a requirement. Switching it off is
+  stored as `false`, not `null`: `load_filters` reads `null` as "use the
+  default". `exclude_seniority` (default senior + intern) uses the level read
+  from the title.
+- **Keywords** are spelled-out role families (`scrape.ROLE_KEYWORDS`): software
+  engineer/developer, ML engineer, AI engineer. Bare `ai` admitted "AI Success
+  Manager" and bare `ml` nothing useful, so they are gone.
 - **Strategies, cheapest first:** `xhr` (the page's own JSON response — survives a
   redesign), `dom` (hand-written selectors), `links` (anchors that look like job
   paths). The winner is saved to `data/career-sites.json`, and a saved strategy
@@ -293,6 +311,34 @@ list** instead of being fought indefinitely — `--flag-help "<Company>" --note
 list is also the workbook's **Needs your help** sheet. Write the reason as the
 question he can answer ("404 — needs the current careers link", "blocked — is
 there a Workday/Lever board?"), not as a log line.
+
+### Open roles tab — `openroles.py`
+
+One list over both sources: the ATS boards read live through `discover.search`,
+and the careers pages as of their **last scrape**, from `data/scraped-roles.json`
+(`{"companies": [{company_id, name, read_on, problem, roles[]}]}`). That file is
+a per-company **snapshot**, not a ledger: each successful read replaces the
+company's roles, a real "no openings" clears them, and a failed read keeps the
+previous roles and records the problem — one bad night must not blank a page
+that read fine yesterday, and `read_on` shows how old they are. Roles are stored
+unfiltered and without JD text, so changing a filter needs no re-scrape.
+`jobs.json` stays the ledger; **Track** promotes a role to `saved` like discovery.
+
+The tab can **start the scraper** (`POST /api/roles/scrape`, scopes `startups`,
+`targets`, `top`, `mid`, `all`, or `names`). It runs `scrape.py` as a subprocess,
+the same command a terminal would, logging to `data/scrape-run.log` — never in
+the API process, which must stay responsive through minutes of Playwright. One
+run at a time (409 otherwise).
+
+**Finding companies.** `company_seed.CATALOGUE` holds curated companies that are
+deliberately *not* seeded — weaker default fits (hiring mostly outside Bengaluru,
+services-heavy, or a careers page that didn't resolve, noted per entry).
+`/api/companies/suggestions` lists the catalogue plus any SEED entry no longer on
+the board; adding goes through `companies.seed`, so it is idempotent. The tab's
+"companies like…" box hands a prompt to the assistant, which has `add_company`.
+New Workday companies carry their India facet in `careers_url`, and the facet's
+parameter name differs per tenant (`locationCountry`, `Location_Country`,
+`Country`, …) — read it off the live board, don't guess.
 
 ### `data/resumes.json` — `{"resumes": [...]}`
 

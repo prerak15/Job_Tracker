@@ -64,6 +64,10 @@ import storage
 from jsonstore import today
 
 SITES_FILE = "career-sites.json"
+# The last roles read from each careers page, unfiltered, for the dashboard's Open
+# roles tab. A snapshot per company that each successful read replaces, not a
+# ledger: jobs.json is the ledger, and a role becomes real only when tracked.
+SCRAPED_FILE = "scraped-roles.json"
 FILTERS_FILE = "role-filters.json"
 
 SITE_TIMEOUT_S = 60
@@ -80,6 +84,18 @@ TIER_ORDER = {"faang": 0, "tier1": 1, "tier2": 2, "growth": 3, "early": 4}
 # Hosts that are skipped outright, with the reason shown in the workbook.
 SKIP_HOSTS = {"linkedin.com": "login wall and terms of service"}
 
+# Software engineer / developer, ML engineer and AI engineer roles.
+# "software" rather than "software engineer": Amazon's title is "Software Development
+# Engineer", which a two-word needle never matches. Bare "engineer" is too broad (it
+# admits hardware and mechanical roles), and bare "ai" admitted "AI Success Manager"
+# and "AI Data Analyst", so the AI/ML titles are spelled out instead.
+ROLE_KEYWORDS = (
+    "software", "sde", "swe", "developer", "backend", "back end", "full stack", "fullstack",
+    "frontend", "front end", "machine learning", "ml engineer", "mlops", "ai engineer",
+    "ai/ml", "ml/ai", "applied ai", "genai", "gen ai", "llm", "data engineer",
+    "platform engineer", "member of technical staff",
+)
+
 DEFAULT_FILTERS: dict[str, Any] = {
     "_note": (
         "keywords match a title or department by word prefix; locations null means the "
@@ -89,18 +105,15 @@ DEFAULT_FILTERS: dict[str, Any] = {
         "which keeps 'Machine Learning Engineer' from being lost to a 'software engineer' search."
     ),
     "primary_query": "",
-    # "software" rather than "software engineer": Amazon's title is "Software Development
-    # Engineer", which a two-word needle never matches. Bare "engineer" is too broad
-    # (it admits hardware and mechanical roles), so the SWE/AI titles are listed instead.
-    "keywords": [
-        "software", "sde", "swe", "developer", "backend", "back end", "full stack",
-        "fullstack", "python", "machine learning", "ml", "ai", "data engineer",
-        "platform engineer", "member of technical staff",
-    ],
+    "keywords": list(ROLE_KEYWORDS),
     "locations": None,
     "exclude_keywords": None,
     "include_remote": False,
     "max_age_days": None,
+    # Early-to-mid career. The range is matched by overlap ("2-5 years" stays, "6-9"
+    # goes), and a posting that states no figure is kept unless required is true.
+    "experience": {"min": 0, "max": 3, "required": False},
+    "exclude_seniority": ["senior", "intern"],
 }
 
 
@@ -137,7 +150,38 @@ def load_filters(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         merged["locations"] = list(discover.INDIA_TOKENS)
     if merged.get("exclude_keywords") is None:
         merged["exclude_keywords"] = list(discover.NOISE_KEYWORDS)
+    merged["experience"] = experience_range(merged.get("experience"))
+    merged["exclude_seniority"] = list(merged.get("exclude_seniority") or [])
     return merged
+
+
+def experience_range(value: Any) -> dict[str, Any] | None:
+    """{"min", "max", "required"} from the file, a CLI "0-3", or None for no filter."""
+    if value in (None, "", False):
+        return None
+    if isinstance(value, str):
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*", value)
+        if not match:
+            raise ValueError(f"experience should look like 0-3, not {value!r}")
+        value = {"min": float(match.group(1)), "max": float(match.group(2))}
+    lo = float(value.get("min") or 0)
+    hi = float(value["max"]) if value.get("max") is not None else 99.0
+    return {"min": min(lo, hi), "max": max(lo, hi), "required": bool(value.get("required"))}
+
+
+def _experience_label(exp: dict[str, Any] | None) -> str:
+    if not exp:
+        return "any"
+    span = f"{exp['min']:g}-{exp['max']:g}"
+    return span + (" (postings must state it)" if exp["required"] else " (unstated postings kept)")
+
+
+def experience_args(filters: dict[str, Any]) -> dict[str, Any]:
+    """The experience part of `discover.filter_roles`' arguments."""
+    exp = filters.get("experience")
+    if not exp:
+        return {"experience": None, "experience_required": False}
+    return {"experience": (exp["min"], exp["max"]), "experience_required": exp["required"]}
 
 
 # --------------------------------------------------------------------------
@@ -295,7 +339,31 @@ def guess_field_map(items: list[Any], path: str) -> dict[str, Any] | None:
         "url": link,
         "location": pick(_LOC_KEYS, want=lambda v: bool(v)),
         "posted": pick(_DATE_KEYS, want=lambda v: v not in (None, "")),
+        **guess_experience_keys(sample),
     }
+
+
+_EXP_PAIRS = (
+    ("minExperience", "maxExperience"), ("min_experience", "max_experience"),
+    ("expMin", "expMax"), ("experience_from", "experience_to"), ("minExp", "maxExp"),
+    ("experienceFrom", "experienceTo"), ("min_exp", "max_exp"),
+)
+_EXP_TEXT_KEYS = ("experience", "experienceRange", "experience_range", "yearsOfExperience", "workExperience")
+
+
+def guess_experience_keys(sample: list[dict[str, Any]]) -> dict[str, str]:
+    """Which keys carry years of experience, if most rows have them."""
+    for lo, hi in _EXP_PAIRS:
+        if sum(1 for row in sample if _years(row.get(lo)) is not None) >= len(sample) * 0.5:
+            return {"exp_min": lo, "exp_max": hi}
+    for key in _EXP_TEXT_KEYS:
+        readable = sum(
+            1 for row in sample
+            if isinstance(row.get(key), str) and discover.parse_experience(row[key], structured=True)
+        )
+        if readable >= len(sample) * 0.5:
+            return {"experience": key}
+    return {}
 
 
 def dig(payload: Any, path: str) -> Any:
@@ -369,6 +437,7 @@ def rows_from_source(
                     if field_map.get("location")
                     else "",
                     "posted": dig(item, field_map["posted"]) if field_map.get("posted") else None,
+                    "experience": row_experience(item, field_map),
                 }
             )
     return rows
@@ -424,6 +493,8 @@ def known_field_map(url: str, path: str) -> dict[str, Any] | None:
             "url_template": f"https://{host}/employer/jobs/careers#?src=careers&p={{id}}&page=careers",
             "location": "location",
             "posted": "approvedOn",
+            "exp_min": "expMin",
+            "exp_max": "expMax",
         }
     if (
         parts.netloc.lower() == "api.pyjamahr.com"
@@ -445,6 +516,8 @@ def known_field_map(url: str, path: str) -> dict[str, Any] | None:
                 else f"https://app.pyjamahr.com/careers?company_uuid={uuid}&job_id={{id}}",
                 "location": "location",
                 "posted": None,
+                "exp_min": "min_experience",
+                "exp_max": "max_experience",
             }
     if (
         parts.netloc.lower() == "careers.kula.ai"
@@ -474,7 +547,34 @@ def known_field_map(url: str, path: str) -> dict[str, Any] | None:
             "url_template": f"https://{parts.netloc}/ms/candidatev2/{tenant}/careers/jobDetails/{{id}}",
             "location": "locations",
             "posted": "posted_on",
+            "exp_min": "experience_from",
+            "exp_max": "experience_to",
         }
+    return None
+
+
+def _years(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        years = float(value)
+    except (TypeError, ValueError):
+        return None
+    return years if 0 <= years <= 40 else None
+
+
+def row_experience(item: dict[str, Any], field_map: dict[str, Any]) -> tuple[float, float | None] | None:
+    """Experience from a board's own fields: a min/max pair, or one text field."""
+    if field_map.get("exp_min"):
+        lo = _years(dig(item, field_map["exp_min"]))
+        hi = _years(dig(item, field_map["exp_max"])) if field_map.get("exp_max") else None
+        if lo is None:
+            return None
+        # A max of 0 under a min of 3 means "not set", not a backwards range.
+        return (lo, hi if hi is not None and hi >= lo else None)
+    if field_map.get("experience"):
+        text = dig(item, field_map["experience"])
+        return discover.parse_experience(str(text), structured=True) if text else None
     return None
 
 
@@ -605,9 +705,20 @@ def cluster_links(anchors: Iterable[dict[str, str]], page_url: str) -> list[dict
             "url": href,
             "location": ", ".join(lines[1:3]),
             "posted": None,
+            "experience": card_experience(lines[1:]),
         }
         for href, lines in best
     ]
+
+
+def card_experience(lines: list[str]) -> tuple[float, float | None] | None:
+    """A job card's own "2 - 5 Years" line. Only short lines: a card's blurb is prose."""
+    for line in lines:
+        if len(line) <= 40:
+            found = discover.parse_experience(line, structured=True)
+            if found:
+                return found
+    return None
 
 
 def job_links(anchors: Iterable[dict[str, str]], page_url: str) -> list[dict[str, Any]]:
@@ -637,7 +748,8 @@ def _keyword_links(anchors: Iterable[dict[str, str]], page_url: str) -> list[dic
             continue
         seen.add(link)
         rows.append(
-            {"title": title, "url": link, "location": ", ".join(lines[1:3]), "posted": None}
+            {"title": title, "url": link, "location": ", ".join(lines[1:3]), "posted": None,
+             "experience": card_experience(lines[1:])}
         )
     return rows
 
@@ -846,6 +958,7 @@ def to_role(company: dict[str, Any], strategy: str, row: dict[str, Any]) -> dict
         url=row["url"],
         locations=[location] if location else [],
         posted=normalize_posted(row.get("posted")),
+        experience=row.get("experience"),
     )
     role["strategy"] = strategy
     return role
@@ -863,6 +976,8 @@ def filter_scraped(roles: list[dict[str, Any]], filters: dict[str, Any]) -> list
         exclude_keywords=filters["exclude_keywords"],
         include_remote=filters["include_remote"],
         max_age_days=filters["max_age_days"],
+        exclude_seniority=filters.get("exclude_seniority") or (),
+        **experience_args(filters),
     )
     located = [r for r in roles if r["locations"]]
     unlocated = [r for r in roles if not r["locations"]]
@@ -921,6 +1036,43 @@ def dedupe_scraped(
             seen.add(key)
             kept.append(role)
     return kept, already
+
+
+def merge_scraped(
+    store: dict[str, Any], results: list[dict[str, Any]], *, as_of: str
+) -> dict[str, Any]:
+    """Fold a run into the per-company snapshot. Pure.
+
+    A read that worked (rows, or a page that says it has no openings) replaces
+    that company's roles. A failure keeps the previous roles and records the
+    problem, so one bad night doesn't blank a company that was readable
+    yesterday — the date shows how old they are.
+    """
+    out = {k: dict(v) for k, v in (store or {}).items()}
+    for result in results:
+        company, problem = result["company"], result["problem"]
+        if problem == "skipped":
+            continue
+        entry = out.get(company["id"], {"roles": [], "read_on": None})
+        entry.update(company_id=company["id"], name=company["name"], problem=f"{problem}: {result['detail']}"[:200] if problem else None)
+        keeps = not problem or (problem in KEEP_ROWS and result["rows"])
+        if keeps:
+            entry["roles"] = [
+                {k: v for k, v in to_role(company, result["strategy"], row).items() if k != "description"}
+                for row in result["rows"]
+            ]
+            entry["read_on"] = as_of
+        out[company["id"]] = entry
+    return out
+
+
+def load_scraped() -> dict[str, dict[str, Any]]:
+    return {c["company_id"]: c for c in jsonstore.read(SCRAPED_FILE, "companies")["companies"]}
+
+
+def save_scraped(store: dict[str, dict[str, Any]]) -> None:
+    ordered = sorted(store.values(), key=lambda c: c.get("name", "").lower())
+    jsonstore.write(SCRAPED_FILE, {"companies": ordered})
 
 
 def assemble(
@@ -1826,6 +1978,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--locations", help="override the stored locations for this run")
     parser.add_argument("--remote", action="store_true", help="include remote roles")
     parser.add_argument("--max-age-days", type=int)
+    parser.add_argument("--experience", help='years wanted for this run, e.g. "0-3"; "any" turns it off')
     parser.add_argument("--out", help="workbook path (default exports/open-roles-<date>.xlsx)")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=float, default=SITE_TIMEOUT_S)
@@ -1854,8 +2007,11 @@ def main(argv: list[str] | None = None) -> int:
             "locations": _csv(args.locations),
             "include_remote": True if args.remote else None,
             "max_age_days": args.max_age_days,
+            "experience": args.experience if args.experience not in (None, "any") else None,
         }
     )
+    if args.experience == "any":
+        filters["experience"] = None
     tiers, statuses = _csv(args.tier) or [], _csv(args.status) or []
     names = [args.review] if args.review else _csv(args.only) or []
     selected = select(board, tiers=tiers, statuses=statuses, names=names)
@@ -1892,6 +2048,8 @@ def main(argv: list[str] | None = None) -> int:
             sites.get(company["id"]), company, result, result["template"] or company["careers_url"]
         )
     save_sites(sites)
+    if not args.review:
+        save_scraped(merge_scraped(load_scraped(), results, as_of=today()))
     companies.record_discovery_many(
         {
             r["company"]["id"]: (
@@ -1936,6 +2094,8 @@ def main(argv: list[str] | None = None) -> int:
             ("Excluded words", ", ".join(filters["exclude_keywords"])),
             ("Remote included", "yes" if filters["include_remote"] else "no"),
             ("Max age (days)", filters["max_age_days"] or "any"),
+            ("Experience (years)", _experience_label(filters.get("experience"))),
+            ("Levels excluded", ", ".join(filters.get("exclude_seniority") or []) or "none"),
             ("Reviewed by hand", f"{sum(1 for c in pool if latest_review(sites.get(c['id'])))} of {len(pool)}"),
         ],
         help_rows(pool, sites),

@@ -5,6 +5,7 @@ import { clock, formatAge, liveSeconds, REFRESH_MS, useAutoRefresh, useTicker } 
 import Applications from './components/Applications'
 import ChatPanel from './components/ChatPanel'
 import Companies from './components/Companies'
+import OpenRoles from './components/OpenRoles'
 import Dsa from './components/Practice'
 import Patterns from './components/Patterns'
 import Resumes from './components/Resumes'
@@ -14,6 +15,7 @@ import SystemDesign from './components/SystemDesign'
 const TABS = [
   { id: 'applications', label: 'Applications' },
   { id: 'companies', label: 'Companies' },
+  { id: 'roles', label: 'Open roles' },
   { id: 'dsa', label: 'DSA' },
   { id: 'design', label: 'System Design' },
   { id: 'patterns', label: 'Patterns' },
@@ -290,6 +292,14 @@ export default function App() {
                 <Companies
                   companies={data.companies}
                   stats={data.companyStats}
+                  meta={data.meta}
+                  reload={reload}
+                  askAssistant={askAssistant}
+                />
+              )}
+              {activeTab === 'roles' && (
+                <OpenRoles
+                  companies={data.companies}
                   meta={data.meta}
                   reload={reload}
                   askAssistant={askAssistant}

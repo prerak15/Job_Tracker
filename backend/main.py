@@ -22,6 +22,7 @@ import discover
 import docx_export
 import dsa
 import latex_export
+import openroles
 import pattern_seed
 import patterns
 import pdf_export
@@ -1062,6 +1063,24 @@ def post_seed() -> dict[str, Any]:
     return companies.seed(company_seed.SEED)
 
 
+class SuggestionsIn(BaseModel):
+    names: list[str]
+
+
+@app.get("/api/companies/suggestions")
+def get_suggestions() -> list[dict[str, Any]]:
+    """Curated companies not on the board yet: the catalogue, plus removed seed entries."""
+    return openroles.suggestions()
+
+
+@app.post("/api/companies/suggestions", status_code=201)
+def post_suggestions(payload: SuggestionsIn) -> dict[str, Any]:
+    try:
+        return openroles.add_suggestions(payload.names)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/companies/{company_id}")
 def get_one_company(company_id: str) -> dict[str, Any]:
     return _found(companies.get_company(company_id), "Company")
@@ -1151,6 +1170,61 @@ def post_promote(payload: PromoteIn) -> dict[str, Any]:
     if not payload.role.get("title") or not payload.role.get("company"):
         raise HTTPException(400, "A role needs at least a title and a company.")
     return storage.create_job(discover.to_job(payload.role, payload.status))
+
+
+# --------------------------------------------------------------------------
+# open roles — job boards + careers pages, one list, one set of filters
+# --------------------------------------------------------------------------
+
+
+class RoleFiltersIn(BaseModel):
+    keywords: list[str] | None = None
+    # {"min", "max", "required"}, a "0-3" string, or null to switch the filter off.
+    experience: dict[str, Any] | str | None = None
+    exclude_seniority: list[str] | None = None
+    include_remote: bool | None = None
+    max_age_days: int | None = None
+
+
+class ScrapeIn(BaseModel):
+    scope: str = "startups"
+    names: list[str] | None = None
+
+
+@app.get("/api/roles")
+async def get_open_roles(refresh: bool = False) -> dict[str, Any]:
+    """Untracked roles matching the saved filters, from boards and careers pages."""
+    return await openroles.open_roles(refresh=refresh)
+
+
+@app.get("/api/roles/filters")
+def get_role_filters() -> dict[str, Any]:
+    return openroles.get_filters()
+
+
+@app.put("/api/roles/filters")
+def put_role_filters(payload: RoleFiltersIn) -> dict[str, Any]:
+    try:
+        return openroles.save_filters(payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/roles/scrape")
+def get_scrape_status() -> dict[str, Any]:
+    return openroles.scrape_status()
+
+
+@app.post("/api/roles/scrape", status_code=202)
+def post_scrape(payload: ScrapeIn) -> dict[str, Any]:
+    """Start the careers-page scraper in the background; poll GET for progress."""
+    try:
+        return openroles.start_scrape(payload.scope, payload.names)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
 
 
 # --------------------------------------------------------------------------

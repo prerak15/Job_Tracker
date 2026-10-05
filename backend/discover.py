@@ -150,6 +150,100 @@ INDIA_TOKENS = (
 _REMOTE_TOKENS = ("remote", "anywhere", "work from home", "distributed")
 
 
+# --------------------------------------------------------------------------
+# experience — "2 - 5 Years" in a board's field, "3+ years of experience" in a JD
+# --------------------------------------------------------------------------
+
+_YEARS = r"(?:years?|yrs?)\b"
+_NUM = r"(\d{1,2}(?:\.\d)?)"
+_EXP_RANGE = re.compile(rf"{_NUM}\s*(?:-|–|—|to)\s*{_NUM}\s*\+?\s*{_YEARS}", re.I)
+_EXP_PLUS = re.compile(rf"{_NUM}\s*\+\s*{_YEARS}", re.I)
+_EXP_AT_LEAST = re.compile(
+    rf"(?:minimum|min\.?|at\s+least|over|more\s+than)\s+(?:of\s+)?{_NUM}\s*\+?\s*{_YEARS}", re.I
+)
+_EXP_SINGLE = re.compile(rf"{_NUM}\s*{_YEARS}", re.I)
+_FRESHER = re.compile(r"\b(freshers?|new\s+grad(uate)?s?|0\s*years?)\b", re.I)
+# A JD mentions years for plenty of reasons ("founded 12 years ago"); only a
+# figure near the word experience is read as a requirement.
+_EXP_WORD = re.compile(r"\bexp(erience|\.)?\b", re.I)
+_EXP_WINDOW = 90
+_EXP_CEILING = 30  # a bigger number is a company age or a typo, not a requirement
+
+
+def _exp_in(text: str) -> tuple[float, float | None] | None:
+    """The first years figure in a short string: a range, an "N+", or a single N."""
+    for pattern, kind in ((_EXP_RANGE, "range"), (_EXP_AT_LEAST, "min"), (_EXP_PLUS, "min"),
+                          (_EXP_SINGLE, "single")):
+        match = pattern.search(text)
+        if not match:
+            continue
+        lo = float(match.group(1))
+        if kind == "range":
+            hi: float | None = float(match.group(2))
+            lo, hi = min(lo, hi), max(lo, hi)
+        elif kind == "min":
+            hi = None
+        else:
+            hi = lo
+        if lo > _EXP_CEILING:
+            continue
+        return lo, hi
+    if _FRESHER.search(text):
+        return 0.0, 0.0
+    return None
+
+
+def parse_experience(text: str | None, *, structured: bool = False) -> tuple[float, float | None] | None:
+    """Years of experience a posting asks for, as (min, max), max None when open-ended.
+
+    `structured` is for a field that holds nothing but experience ("2 - 5 Years",
+    Darwinbox's `experience`), where any figure counts. Free text (a title, a JD)
+    is only read within a short window of the word "experience", so a company's
+    age or a team's size isn't mistaken for a requirement. The first such
+    figure wins: JDs open with the headline requirement and then list
+    sub-skills ("3+ years overall; 1+ year with Kafka").
+    """
+    if not text:
+        return None
+    if structured:
+        return _exp_in(text)
+    for match in _EXP_WORD.finditer(text):
+        start = max(0, match.start() - _EXP_WINDOW)
+        window = text[start: match.end() + _EXP_WINDOW]
+        found = _exp_in(window)
+        if found:
+            return found
+    return None
+
+
+def format_experience(exp: tuple[float, float | None] | None) -> str:
+    if not exp:
+        return ""
+    lo, hi = (f"{v:g}" if v is not None else None for v in exp)
+    if hi is None:
+        return f"{lo}+ yrs"
+    return f"{lo} yrs" if lo == hi else f"{lo}-{hi} yrs"
+
+
+def experience_fits(
+    role: dict[str, Any], want: tuple[float, float] | None, *, required: bool = False
+) -> bool:
+    """Does the posting's range overlap the range wanted?
+
+    Overlap, not containment: "2-5 years" is open to someone with 2, and a
+    3+-year bar is reachable from a 0-3 search. A posting that states no figure
+    is kept unless `required` — most careers pages never say, and dropping
+    them would empty the list.
+    """
+    if not want:
+        return True
+    lo, hi = role.get("exp_min"), role.get("exp_max")
+    if lo is None:
+        return not required
+    want_lo, want_hi = want
+    return lo <= want_hi and (hi is None or hi >= want_lo)
+
+
 def _is_remote(text: str) -> bool:
     lowered = text.lower()
     return any(token in lowered for token in _REMOTE_TOKENS)
@@ -176,8 +270,16 @@ def _role(
     department: str = "",
     employment_type: str = "",
     description: str = "",
+    experience: tuple[float, float | None] | None = None,
 ) -> dict[str, Any]:
     locations = [loc for loc in (l.strip() for l in locations) if loc]
+    # A board's own field wins, then the title ("SDE (2-4 yrs)"), then the JD —
+    # read in full, before it is truncated for storage.
+    exp = (
+        experience
+        or parse_experience(title)
+        or parse_experience(description)
+    )
     return {
         "company": company.get("name", ""),
         "company_id": company.get("id"),
@@ -193,6 +295,9 @@ def _role(
         "department": (department or "").strip(),
         "employment_type": (employment_type or "").strip(),
         "seniority": guess_seniority(title or ""),
+        "exp_min": exp[0] if exp else None,
+        "exp_max": exp[1] if exp else None,
+        "experience": format_experience(exp),
         "description": description[:DESCRIPTION_LIMIT],
     }
 
@@ -326,6 +431,8 @@ def filter_roles(
     include_remote: bool = False,
     max_age_days: int | None = None,
     exclude_seniority: Iterable[str] = (),
+    experience: tuple[float, float] | None = None,
+    experience_required: bool = False,
     as_of: date | None = None,
 ) -> list[dict[str, Any]]:
     excluded = {s.lower() for s in exclude_seniority}
@@ -347,6 +454,8 @@ def filter_roles(
             if not here and not (include_remote and role["remote"]):
                 continue
         if role["seniority"] in excluded:
+            continue
+        if not experience_fits(role, experience, required=experience_required):
             continue
         # A posting with no date is kept — missing metadata shouldn't hide a
         # real role. Only a date we can read and that is too old excludes one.
@@ -450,6 +559,8 @@ async def search(
     include_remote: bool = False,
     max_age_days: int | None = None,
     exclude_seniority: Iterable[str] = (),
+    experience: tuple[float, float] | None = None,
+    experience_required: bool = False,
     limit: int = 100,
     include_description: bool = False,
     force: bool = False,
@@ -512,6 +623,8 @@ async def search(
         include_remote=include_remote,
         max_age_days=max_age_days,
         exclude_seniority=exclude_seniority,
+        experience=experience,
+        experience_required=experience_required,
     )
     fresh, already = dedupe(filtered, storage.list_jobs())
     # Newest first; undated postings sort last rather than jumping the queue.
@@ -549,6 +662,7 @@ def to_job(role: dict[str, Any], status: str = "saved") -> dict[str, Any]:
     denominator, so auto-discovery can't quietly wreck your response rate.
     """
     provider = role.get("provider", "board")
+    where = "careers page" if provider == "careers_page" else f"{provider} board"
     return {
         "job_title": role.get("title", ""),
         "organisation": role.get("company", ""),
@@ -558,7 +672,7 @@ def to_job(role: dict[str, Any], status: str = "saved") -> dict[str, Any]:
         "date_job_posted": role.get("posted"),
         "company_type": role.get("category"),
         "source": "careers_page",
-        "found_via": f"tracker discovery — {provider} board",
+        "found_via": f"tracker discovery — {where}",
         "job_description": role.get("description", "") or "",
-        "latest_update": f"Found on {role.get('company', 'their')} {provider} board",
+        "latest_update": f"Found on {role.get('company', 'their')} {where}",
     }
