@@ -2085,9 +2085,26 @@ def health() -> dict[str, Any]:
 
     import claude_agent_sdk  # noqa: PLC0415
 
-    bundled = _Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude.exe"
-    cli = str(bundled) if bundled.exists() else shutil.which("claude")
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    bundled_dir = _Path(claude_agent_sdk.__file__).parent / "_bundled"
+    bundled = next(
+        (p for p in (bundled_dir / "claude.exe", bundled_dir / "claude") if p.exists()),
+        None,
+    )
+    cli = str(bundled) if bundled else shutil.which("claude")
     logged_in = (_Path.home() / ".claude" / ".credentials.json").exists()
+    if not logged_in and sys.platform == "darwin":
+        # On macOS the CLI keeps its login in the Keychain, not in a file.
+        try:
+            logged_in = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials"],
+                capture_output=True,
+                timeout=5,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            pass
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
     if not cli:
