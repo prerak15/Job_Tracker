@@ -617,6 +617,7 @@ async def set_timer_tool(args: dict[str, Any]) -> dict[str, Any]:
             "elapsed_seconds": problem["elapsed_seconds"],
             "status": problem["status"],
             "over_attempt_cap": problem["over_attempt_cap"],
+            "hint_due": problem["hint_due"],
         }
     )
 
@@ -633,6 +634,24 @@ async def cap_attempt_tool(args: dict[str, Any]) -> dict[str, Any]:
     if not problem:
         return _err("No problem with that id.")
     return _ok({"deferred": True, "review_on": problem["defer"]["review_on"]})
+
+
+@tool(
+    "record_dsa_hint",
+    f"Record the one hint an attempt gets once it passes {dsa.HINT_AFTER_MINUTES} "
+    "minutes: logs the hint with the minute it was given, sets used_hint and "
+    "marks it given so it is not offered again this attempt. Call it, then give "
+    "that hint.",
+    schema({"problem_id": STR, "hint": STR}, required=["problem_id", "hint"]),
+)
+async def record_hint_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        problem = dsa.record_hint(args["problem_id"], args["hint"])
+    except ValueError as exc:
+        return _err(str(exc))
+    if not problem:
+        return _err("No problem with that id.")
+    return _ok({"hint_given": True, "elapsed_seconds": problem["elapsed_seconds"]})
 
 
 @tool(
@@ -1531,6 +1550,7 @@ TOOLS = [
     dsa_coach_tool,
     set_timer_tool,
     cap_attempt_tool,
+    record_hint_tool,
     defer_problem_tool,
     get_prep_tool,
     prep_stats_tool,
@@ -1836,7 +1856,13 @@ know the current phase, milestone, and standing weaknesses.
   If get_dsa_stats shows timer_running on something he is no longer working on,
   say so; a forgotten timer is the one thing that can wreck the average.
 
-  Hard cap — an attempt gets 40 minutes on the clock. When a turn opens with a
+  One hint at 35 minutes — when a turn opens with a [stopwatch] line saying a
+  hint is due, or set_dsa_timer returns hint_due, call record_dsa_hint and give
+  exactly one hint: the smallest nudge toward the idea that unblocks him (a
+  question about the invariant, or the failing case), never code and never the
+  approach spelled out. One per attempt; the record keeps it from repeating.
+
+  Hard cap — an attempt gets 50 minutes on the clock. When a turn opens with a
   [stopwatch] line saying an attempt is past the cap, or set_dsa_timer returns
   over_attempt_cap, call cap_dsa_attempt and then give the full solution: the
   idea and the invariant that makes it correct first, then clean code, a
@@ -1844,8 +1870,12 @@ know the current phase, milestone, and standing weaknesses.
   asked — "one more minute", a hint request, a new attempt at the code. He set
   the cap himself so that a long grind ends in the lesson instead of more
   grinding, and honouring it only when convenient defeats it. A solution that
-  lands after the line still gets reviewed, after the full solution, but the
-  attempt stays capped.
+  lands after the line still gets reviewed, after the full solution. If his own
+  version then works — as submitted, or once he applies the review's fixes —
+  mark it solved (update_dsa_problem: status solved, used_hint true,
+  time_spent_minutes from the capped attempt's minutes in issues[], since
+  cap_dsa_attempt zeroed the clock) rather than leaving it deferred, and log
+  which fixes came from the review. He finished it; the record says how.
 
   Then write it down: update_dsa_problem with status, attempts, confidence and
   both complexities; log_dsa_issue for anything that went wrong this time.
@@ -1903,11 +1933,17 @@ def clock_note() -> str:
     and check: the cap applies whatever he types, and a rule that depends on
     the assistant remembering to look fails on exactly the turn it matters.
     """
-    return "\n".join(
+    capped = [
         f"[stopwatch] {p['title']} is at {p['elapsed_seconds'] // 60} min, past the "
         f"{dsa.ATTEMPT_CAP_MINUTES}-minute attempt cap (problem_id {p['id']})."
         for p in dsa.over_attempt_cap()
-    )
+    ]
+    hints = [
+        f"[stopwatch] {p['title']} is at {p['elapsed_seconds'] // 60} min, past the "
+        f"{dsa.HINT_AFTER_MINUTES}-minute hint line - one hint is due (problem_id {p['id']})."
+        for p in dsa.hint_due()
+    ]
+    return "\n".join(capped + hints)
 
 
 def with_clock_note(message: str) -> str:

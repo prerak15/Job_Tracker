@@ -473,23 +473,39 @@ Marking a problem solved banks the running segment and fills
 empty. A hand-entered figure for a problem solved away from the app is an
 explicit act and always wins.
 
-### The attempt cap — `ATTEMPT_CAP_MINUTES` (40)
+### The hint line and the cap — `HINT_AFTER_MINUTES` (35), `ATTEMPT_CAP_MINUTES` (50)
 
-He set this himself: an attempt gets 40 minutes on the clock, and past the line
-he gets the full solution **whatever he has just typed** — "one more minute", a
-hint request, another rewrite. Honoured only when convenient, a cap is not one.
+He set these himself (2026-10-15, replacing a flat 40-minute cap): at 35
+minutes on the clock an attempt gets **one hint**; at 50 he gets the full
+solution **whatever he has just typed** — "one more minute", another hint
+request, another rewrite. Honoured only when convenient, a cap is not one.
 This binds a Claude Code session in this folder exactly as it binds the web
 chat.
 
 - **The server enforces it, not the model's memory.** `ai.with_clock_note`
   puts a `[stopwatch]` line in front of every chat turn while an open attempt
-  is past the cap. A rule that depends on the assistant remembering to check
+  is past either line. A rule that depends on the assistant remembering to check
   fails on exactly the turn it matters. In a Claude Code session there is no
-  such hook, so check `dsa.over_attempt_cap()` (or the problem's
-  `over_attempt_cap`) before replying to anything during an attempt.
+  such hook, so check `dsa.over_attempt_cap()` and `dsa.hint_due()` (or the
+  problem's `over_attempt_cap` / `hint_due`) before replying to anything during
+  an attempt.
+- **The hint is one, and recorded.** `record_hint()` logs it to `issues[]` with
+  the minute it was given, sets `used_hint`, and sets `timer.hint_given`. That
+  flag is what stops the hint line firing again on every later turn, and it
+  lives in `timer` so it is zeroed with the clock — the next attempt gets its
+  own hint. A hint is the smallest nudge toward the idea (a question about the
+  invariant, or the failing case), never code. `hint_due` is false past the cap:
+  there the solution is owed instead.
 - **Paused counts.** A clock paused for review at 45 minutes crossed the line
   before the solution arrived. A solution that lands after the line still gets
-  reviewed, after the full solution, but the attempt stays capped.
+  reviewed, after the full solution.
+- **Finishing after the line counts** (his call, 2026-10-15). The solution is
+  still shown at 50 — that part is not negotiable — but if his own version then
+  works, as submitted or once he applies the review's fixes, it is marked
+  `solved`, not left deferred: `used_hint` true, `time_spent_minutes` from the
+  capped attempt's minutes in `issues[]` (the clock was zeroed), and an issue
+  entry naming which fixes came from the review. The cap bounds the grind; it
+  does not take away a solve he finished.
 - **`cap_attempt()` is the one action.** It logs the attempt's length to
   `issues[]`, bumps `attempts`, sets `used_hint`, defers the problem for
   `REVISIT_AFTER_CAP_DAYS` (14), and **zeroes the clock**. The zeroing is what

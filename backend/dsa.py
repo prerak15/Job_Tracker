@@ -56,7 +56,10 @@ STALE_SEGMENT_HOURS = 4
 # cold REVISIT_AFTER_CAP_DAYS later to be re-derived rather than recalled. The
 # cap is per attempt, so ending one zeroes the clock -- a return visit that
 # started already over the line would hand the solution straight back.
-ATTEMPT_CAP_MINUTES = 40
+# He set both lines himself (2026-10-15, up from a flat 40): one hint at
+# HINT_AFTER_MINUTES, the full solution at ATTEMPT_CAP_MINUTES.
+HINT_AFTER_MINUTES = 35
+ATTEMPT_CAP_MINUTES = 50
 REVISIT_AFTER_CAP_DAYS = 14
 
 _DEFAULTS: dict[str, Any] = {
@@ -93,8 +96,10 @@ _DEFAULTS: dict[str, Any] = {
     # The stopwatch. `started_at` is the current running segment (None when
     # paused), `accumulated_seconds` is every segment already banked. Server
     # side rather than in the browser, because a refresh, a second tab and the
-    # chat agent must all see the same clock.
-    "timer": {"started_at": None, "accumulated_seconds": 0, "capped": False},
+    # chat agent must all see the same clock. `hint_given` belongs to the
+    # attempt, so it lives here and is zeroed with the clock: without it the
+    # hint line would fire again on every turn past HINT_AFTER_MINUTES.
+    "timer": {"started_at": None, "accumulated_seconds": 0, "capped": False, "hint_given": False},
 }
 
 
@@ -110,6 +115,7 @@ def _normalize(problem: dict[str, Any]) -> dict[str, Any]:
     timer.setdefault("started_at", None)
     timer.setdefault("accumulated_seconds", 0)
     timer.setdefault("capped", False)
+    timer.setdefault("hint_given", False)
     out["timer"] = timer
     if out["status"] == "deferred":
         gate = dict(out.get("defer") or {})
@@ -186,6 +192,19 @@ def _over_attempt_cap(problem: dict[str, Any]) -> bool:
     )
 
 
+def _hint_due(problem: dict[str, Any]) -> bool:
+    """An open attempt past HINT_AFTER_MINUTES that has not had its one hint.
+
+    Past the cap the solution is owed instead, so the two never overlap.
+    """
+    elapsed = elapsed_seconds(problem)
+    return (
+        problem.get("status") == "in_progress"
+        and not (problem.get("timer") or {}).get("hint_given")
+        and HINT_AFTER_MINUTES * 60 <= elapsed < ATTEMPT_CAP_MINUTES * 60
+    )
+
+
 def _public(problem: dict[str, Any]) -> dict[str, Any]:
     """A copy with the live stopwatch reading attached.
 
@@ -197,12 +216,43 @@ def _public(problem: dict[str, Any]) -> dict[str, Any]:
         **problem,
         "elapsed_seconds": elapsed_seconds(problem),
         "over_attempt_cap": _over_attempt_cap(problem),
+        "hint_due": _hint_due(problem),
     }
 
 
 def over_attempt_cap() -> list[dict[str, Any]]:
     """Open attempts past the cap -- each one is owed its solution now."""
     return [_public(p) for p in load()[KEY] if _over_attempt_cap(p)]
+
+
+def hint_due() -> list[dict[str, Any]]:
+    """Open attempts past the hint line -- each one is owed one hint now."""
+    return [_public(p) for p in load()[KEY] if _hint_due(p)]
+
+
+def record_hint(problem_id: str, hint: str, on: str | None = None) -> dict[str, Any] | None:
+    """Write down the one hint an attempt gets, and mark it given.
+
+    The hint goes into `issues[]` with the minute it was given, so a later solve
+    shows what it rested on; `used_hint` is set because that solve was not unaided.
+    """
+    if not (hint or "").strip():
+        raise ValueError("the hint itself is required")
+    with _lock:
+        data = load()
+        for idx, problem in enumerate(data[KEY]):
+            if problem["id"] != problem_id:
+                continue
+            minutes = elapsed_seconds(problem) // 60
+            problem["issues"].append(
+                {"date": on or today(), "issue": f"Hint at {minutes} min: {hint.strip()}"}
+            )
+            problem["used_hint"] = True
+            problem["timer"]["hint_given"] = True
+            data[KEY][idx] = _normalize(problem)
+            write(FILE, data)
+            return _public(data[KEY][idx])
+        return None
 
 
 def cap_attempt(problem_id: str, on: str | None = None) -> dict[str, Any] | None:
@@ -231,7 +281,7 @@ def cap_attempt(problem_id: str, on: str | None = None) -> dict[str, Any] | None
             )
             problem["attempts"] = int(problem.get("attempts") or 0) + 1
             problem["used_hint"] = True
-            problem["timer"] = {"started_at": None, "accumulated_seconds": 0, "capped": False}
+            problem["timer"] = {"started_at": None, "accumulated_seconds": 0, "capped": False, "hint_given": False}
             problem["status"] = "deferred"
             problem["defer"] = {
                 "reason": f"Attempt capped at {ATTEMPT_CAP_MINUTES} min on {stamp}; "
@@ -343,6 +393,7 @@ def set_timer(problem_id: str, action: str) -> dict[str, Any] | None:
                     "started_at": None,
                     "accumulated_seconds": 0,
                     "capped": False,
+                    "hint_given": False,
                 }
             data[KEY][idx] = _normalize(problem)
             write(FILE, data)

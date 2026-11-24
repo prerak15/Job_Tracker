@@ -1259,6 +1259,11 @@ assert not scrape.looks_like_jobs(_titles(
     "Gamify slashed implementation timelines"))
 assert not scrape.looks_like_jobs(_titles("Application", "Application", "Application"))
 assert not scrape.looks_like_jobs([])
+# Amazon: distinct openings, one title. A real list, not a repeated button.
+_sde = [{"title": "Software Development Engineer", "url": f"https://www.amazon.jobs/en/jobs/{n}/sde"}
+        for n in range(10)]
+assert scrape.looks_like_jobs(_sde)
+assert not scrape.looks_like_jobs([{**r, "url": "https://x.example/jobs/1"} for r in _sde])
 
 # Walls are reported, never bypassed.
 assert scrape.classify_page(403, "") == "HTTP 403"
@@ -1454,9 +1459,36 @@ overrun = dsa.create_problem({"title": "Overrun"})
 dsa.set_timer(overrun["id"], "start")
 _rewind(overrun["id"], (dsa.ATTEMPT_CAP_MINUTES + 1) * 60)
 noted = ai.with_clock_note("one more minute")
-assert noted.startswith("[stopwatch] Overrun is at 41 min"), noted
+assert noted.startswith(f"[stopwatch] Overrun is at {dsa.ATTEMPT_CAP_MINUTES + 1} min"), noted
 assert overrun["id"] in noted and noted.endswith("\n\none more minute"), noted
 dsa.cap_attempt(overrun["id"])
+assert ai.clock_note() == ""
+
+# The hint line: one hint between HINT_AFTER_MINUTES and the cap, then never again
+# that attempt -- the record is what stops it repeating on every turn.
+assert dsa.HINT_AFTER_MINUTES < dsa.ATTEMPT_CAP_MINUTES
+assert f"One hint at {dsa.HINT_AFTER_MINUTES} minutes" in prompt, "prompt and hint line disagree"
+stuck = dsa.create_problem({"title": "Stuck"})
+dsa.set_timer(stuck["id"], "start")
+_rewind(stuck["id"], (dsa.HINT_AFTER_MINUTES - 1) * 60)
+assert dsa.get_problem(stuck["id"])["hint_due"] is False and ai.clock_note() == ""
+_rewind(stuck["id"], (dsa.HINT_AFTER_MINUTES + 1) * 60)
+assert dsa.get_problem(stuck["id"])["hint_due"] is True
+assert "one hint is due" in ai.clock_note() and stuck["id"] in ai.clock_note(), ai.clock_note()
+try:
+    dsa.record_hint(stuck["id"], "  ")
+    raise AssertionError("a hint with no text must not be recorded")
+except ValueError:
+    pass
+hinted = dsa.record_hint(stuck["id"], "What does a leaf look like here?")
+assert hinted["used_hint"] is True and hinted["hint_due"] is False, hinted
+assert hinted["issues"][-1]["issue"].startswith(f"Hint at {dsa.HINT_AFTER_MINUTES + 1} min:"), hinted["issues"]
+assert ai.clock_note() == "", "a given hint must not be offered again"
+# Past the cap the solution is owed, not a hint -- the two lines never overlap.
+_rewind(stuck["id"], (dsa.ATTEMPT_CAP_MINUTES + 1) * 60)
+assert dsa.get_problem(stuck["id"])["hint_due"] is False
+capped_stuck = dsa.cap_attempt(stuck["id"])
+assert capped_stuck["timer"]["hint_given"] is False, "the next attempt gets its own hint"
 assert ai.clock_note() == ""
 print(f"prompt OK   {len(names)} tools, {len(prompt)} chars")
 

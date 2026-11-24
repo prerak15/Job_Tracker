@@ -71,6 +71,14 @@ SCRAPED_FILE = "scraped-roles.json"
 FILTERS_FILE = "role-filters.json"
 
 SITE_TIMEOUT_S = 60
+# Longest wait for a page's own loading to finish (spinners gone, content stopped
+# changing). Network-idle alone is not "loaded": Myntra went idle on an empty shell
+# and Vahan on "Showing 0 Job Listings", both before the list arrived. A site in
+# career-sites.json can set its own "wait_ms".
+LOAD_WAIT_MS = 15000
+# A page that loaded and read empty gets this much longer, once, before the
+# scraper gives up on it or goes looking elsewhere — some lists fetch late.
+RETRY_WAIT_MS = 5000
 DEFAULT_WORKERS = 3
 SCROLLS = 4
 MAX_PAGES = 8  # "load more" clicks / "next" pages per site; career-sites.json can raise it
@@ -859,12 +867,19 @@ _ROLE_WORDS = re.compile(
 
 
 def looks_like_jobs(rows: list[dict[str, Any]]) -> bool:
-    """Most titles must read like job titles, and they cannot all be the same string."""
+    """Most titles must read like job titles, and they cannot all be the same button text.
+
+    Identical titles alone are not a reason to reject: Amazon's first page for
+    "software development engineer" is ten distinct openings all titled exactly
+    that, and rejecting it emptied the whole site. What the guard is for is a row
+    of "View and Apply" cards — the same string, not a job title, or one link.
+    """
     if not rows:
         return False
     titles = [r["title"] for r in rows]
     if len(titles) >= 3 and len(set(t.lower() for t in titles)) == 1:
-        return False
+        if not _ROLE_WORDS.search(titles[0]) or len({link_key(r.get("url") or "") for r in rows}) == 1:
+            return False
     hits = sum(1 for t in titles if _ROLE_WORDS.search(t))
     return hits >= max(1, 0.5 * len(titles))
 
@@ -1366,6 +1381,90 @@ async def _settle(page, ms: int) -> None:
         pass
 
 
+# What the page itself says about whether it is still loading: a visible spinner,
+# skeleton or "Loading…" placeholder, aria-busy, or a body with almost no text.
+# Sizes are counted so the caller can wait for them to stop changing.
+_READY_JS = r"""() => {
+  const shown = el => { const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0'; };
+  const sel = '[aria-busy="true"],[role="progressbar"],[class*="spinner" i],[class*="loader" i],'
+            + '[class*="loading" i],[class*="skeleton" i],[class*="shimmer" i],[class*="placeholder-glow" i]';
+  let busy = [...document.querySelectorAll(sel)].some(el => el.tagName !== 'IMG' && shown(el));
+  if (!busy) busy = [...document.querySelectorAll('body *')].some(el =>
+    el.children.length === 0 && /^\s*(loading|please wait|fetching)\b[.…\s]*$/i.test(el.textContent || '') && shown(el));
+  const text = (document.body && document.body.innerText || '').length;
+  return {busy: busy || text < 200, text, links: document.querySelectorAll('a[href]').length};
+}"""
+
+
+async def _wait_loaded(page, budget_ms: int) -> None:
+    """Wait until the page has finished loading its content, up to `budget_ms`.
+
+    Loaded means: nothing on the page says it is still loading, and the text and
+    link counts held still across three checks (~1.5s). A page that never settles
+    — a ticker, a carousel counting views — is read when the budget runs out.
+    """
+    deadline = time.monotonic() + budget_ms / 1000
+    last, steady = None, 0
+    while time.monotonic() < deadline:
+        try:
+            state = await page.evaluate(_READY_JS)
+        except Exception:  # mid-navigation: the document is being replaced
+            state = None
+        shape = (state["text"], state["links"]) if state else None
+        if state and not state["busy"] and shape == last:
+            steady += 1
+            if steady >= 3:
+                return
+        else:
+            steady = 0
+        last = shape
+        await page.wait_for_timeout(500)
+
+
+async def _load(page, cfg: dict[str, Any], settle_ms: int = 8000) -> None:
+    """Network quiet, then the page's own loading finished."""
+    await _settle(page, settle_ms)
+    await _wait_loaded(page, int(cfg.get("wait_ms") or LOAD_WAIT_MS))
+
+
+async def _click_entry(page, capture: "Capture", cfg: dict[str, Any]):
+    """Click a "View openings"-style control that is not a plain link.
+
+    Some careers pages reach the list through a button, or a link that opens in a
+    new window (target=_blank, window.open). Returns the page to continue on — the
+    new window if one opened, else this page, which the click may have navigated
+    or filled in — or None if there was nothing to click.
+    """
+    for role in ("button", "link"):
+        control = page.get_by_role(role, name=_ENTRY_TEXT).first
+        try:
+            if not await control.count() or not await control.is_visible():
+                continue
+        except Exception:
+            continue
+        # Attach before the click: a new window's first responses are often the
+        # job list itself, and listening only after it opened would miss them.
+        page.context.on("page", capture.attach)
+        try:
+            async with page.context.expect_page(timeout=6000) as popup:
+                await control.click(timeout=5000)
+            new = await popup.value
+            await new.wait_for_load_state("domcontentloaded", timeout=30000)
+            await _load(new, cfg)
+            await capture.drain()
+            return new
+        except Exception:
+            pass  # no new window: the click navigated here, or revealed the list in place
+        finally:
+            page.context.remove_listener("page", capture.attach)
+        await _load(page, cfg, 5000)
+        await capture.drain()
+        return page
+    return None
+
+
 async def _ui_steps(page, steps: list[dict[str, Any]], filters: dict[str, Any]) -> None:
     """Per-site hand-written steps for filters that cannot be set in the URL."""
     values = {"{q}": filters["primary_query"], "{location}": (filters["locations"] or [""])[0]}
@@ -1563,15 +1662,19 @@ async def _all_anchors(page) -> list[dict[str, str]]:
 
 
 async def _open(
-    page, capture: Capture, url: str, timeout_ms: int, max_pages: int | None = None
+    page, capture: Capture, url: str, timeout_ms: int, cfg: dict[str, Any]
 ) -> str:
     """Navigate, let the list load, and return the body text."""
     response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     capture.status = response.status if response else None
-    await _settle(page, 8000)
-    await _expand(page, max_pages)
+    await _load(page, cfg)
+    await _expand(page, cfg.get("max_pages"))
     await _settle(page, 3000)
     await capture.drain()
+    return await _body(page)
+
+
+async def _body(page) -> str:
     try:
         return await page.inner_text("body", timeout=5000)
     except Exception:
@@ -1603,16 +1706,13 @@ async def _work(
 ) -> None:
     response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     capture.status = response.status if response else None
-    await _settle(page, 8000)
+    await _load(page, cfg)
     await _ui_steps(page, cfg.get("ui_steps") or [], filters)
     await _expand(page, cfg.get("max_pages"))
     await _settle(page, 3000)
     await capture.drain()
 
-    try:
-        body = await page.inner_text("body", timeout=5000)
-    except Exception:
-        body = ""
+    body = await _body(page)
     wall = classify_page(capture.status, body)
     if wall:
         result.update(problem="blocked", detail=wall)
@@ -1620,10 +1720,19 @@ async def _work(
 
     rows, used, learned = await _extract(page, capture, cfg, url_base)
 
+    # Read empty: give a late-fetching list one more chance before going elsewhere.
+    if not rows and not says_no_openings(body):
+        await page.wait_for_timeout(RETRY_WAIT_MS)
+        await _load(page, cfg, 3000)
+        await _expand(page, cfg.get("max_pages"))
+        await capture.drain()
+        body = await _body(page)
+        rows, used, learned = await _extract(page, capture, cfg, url_base)
+
     # Nothing here: follow the page's own way to its list ("View open roles", an
     # embedded board) — or, from a 404, start again at the site's front door. A hop
     # that works is saved as search_url, so the next run goes straight there.
-    hops = 0
+    hops, clicked = 0, False
     while not rows and hops < MAX_HOPS and not says_no_openings(body) and not cfg.get("no_hop"):
         target = pick_entry_link(
             await _all_anchors(page), [f.url for f in page.frames[1:]], page.url
@@ -1632,10 +1741,30 @@ async def _work(
         if not target and capture.status == 404 and hops == 0:
             target, from_root = site_root(page.url), True
         if not target:
-            break
+            # No link to follow: the way in may be a button, or open a new window.
+            if clicked:
+                break
+            clicked = True
+            landed = await _click_entry(page, capture, cfg)
+            if landed is None:
+                break
+            hops += 1
+            page = result["_page"] = landed
+            await _expand(page, cfg.get("max_pages"))
+            await capture.drain()
+            body = await _body(page)
+            wall = classify_page(capture.status, body)
+            if wall:
+                result.update(problem="blocked", detail=f"{wall} (after clicking through to {page.url})")
+                return
+            rows, used, learned = await _extract(page, capture, cfg, url_base)
+            if rows:
+                learned = {**learned, "search_url": page.url}
+                result["search_url"] = page.url
+            continue
         hops += 1
         target = listing_url_for(target)
-        body = await _open(page, capture, target, timeout_ms, cfg.get("max_pages"))
+        body = await _open(page, capture, target, timeout_ms, cfg)
         wall = classify_page(capture.status, body)
         if wall:
             result.update(problem="blocked", detail=f"{wall} (after following {target})")
@@ -1782,6 +1911,9 @@ async def scrape_site(
         )
     except Exception as exc:
         result.update(problem=classify_exception(exc), detail=short(exc))
+    # A click-through may have moved the work into a new window; the snapshot and a
+    # review should show where the scraper ended up, not the page it started on.
+    page = result.pop("_page", None) or page
 
     if result["problem"] and result["problem"] != "skipped":
         directory = snapshot_root() / today() / _slug(company["name"])
