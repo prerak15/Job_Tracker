@@ -1014,6 +1014,18 @@ assert scrape.source_total(captured, endpoint, fmap) == 3, "the fixture's own to
 with_total = [(captured[0][0], {**WORKDAY, "total": 244}), (captured[1][0], {**page_two, "total": 0})]
 assert scrape.source_total(with_total, endpoint, fmap) == 244
 assert [r["url"] for r in scrape.merge_rows(rows[:2], rows[1:])] == [r["url"] for r in rows]
+# Oracle Cloud nests its jobs one list deep: a numeric path part indexes the list.
+ORACLE = {"items": [{"TotalJobsCount": 2, "requisitionList": [
+    {"Id": "351304", "Title": "Platform Software Engineer", "PrimaryLocation": "BENGALURU, KARNATAKA, India"},
+    {"Id": "351308", "Title": "Data Engineer", "PrimaryLocation": "India"}]}]}
+assert scrape.dig(ORACLE, "items.0.TotalJobsCount") == 2
+assert scrape.dig(ORACLE, "items.5.requisitionList") is None, "out of range is None, not IndexError"
+assert scrape.dig({"a": {"b": 1}}, "a.b") == 1, "dict paths unchanged"
+ofmap = {"path": "items.0.requisitionList", "title": "Title", "id": "Id",
+         "url_template": "https://careers.example/job/{id}", "location": "PrimaryLocation", "posted": None}
+orows = scrape.rows_from_source([("https://h/hcmRestApi/x", ORACLE)], "h/hcmRestApi/x", ofmap,
+                                page_url="https://careers.example", url_base=None)
+assert [r["url"] for r in orows] == ["https://careers.example/job/351304", "https://careers.example/job/351308"], orows
 
 asof = _dt.date(2026, 10, 5)
 assert scrape.normalize_posted("Posted 3 Days Ago", asof) == "2026-10-02"

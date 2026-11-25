@@ -377,6 +377,11 @@ def guess_experience_keys(sample: list[dict[str, Any]]) -> dict[str, str]:
 def dig(payload: Any, path: str) -> Any:
     node = payload
     for part in path.split(".") if path else []:
+        # A numeric part indexes a list: Oracle Cloud nests its jobs under
+        # `items.0.requisitionList`.
+        if isinstance(node, list) and part.isdigit():
+            node = node[int(part)] if int(part) < len(node) else None
+            continue
         if not isinstance(node, dict):
             return None
         node = node.get(part)
